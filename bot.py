@@ -1069,7 +1069,9 @@ async def main():
     print("💸 Transferências com confirmação disponíveis!")
     
     # Executar bot
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    await application.initialize()
+    await application.start()
 
 # if __name__ == '__main__':
 #     asyncio.run(main())
