@@ -291,9 +291,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif data == "menu_adicionar":
-        await query.message.reply_text(
-            "💰 **Adicionar/Remover Valor**:\n\n💬 Digite o valor desejado (ex: `25.50` ou `-10.00`).",
-            reply_markup=ForceReply(selective=True)
+        # await query.message.reply_text(
+        #     "💰 **Adicionar/Remover Valor**:\n\n💬 Digite o valor desejado (ex: `25.50` ou `-10.00`).",
+        #     reply_markup=ForceReply(selective=True)
+        # )
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="💰 **Adicionar/Remover Valor**:\n\n💬 Digite o valor desejado (ex: `25.50` ou `-10.00`).",
+            reply_markup=ForceReply(selective=True),
+            parse_mode="Markdown"
         )
     
     elif data == "menu_saldo":
