@@ -1069,19 +1069,15 @@ async def main():
     print("💸 Transferências com confirmação disponíveis!")
     
     # Executar bot
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
-    # await application.initialize()
-    # await application.start()
+    # await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    await application.initialize()
+    await application.start()
+    print("Bot rodando...")
+    await application.updater.start_polling()
+
 
 # if __name__ == '__main__':
 #     asyncio.run(main())
 
-def start_bot():
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
-    loop.create_task(main())
-
+async def start_bot():
+    asyncio.create_task(main())
