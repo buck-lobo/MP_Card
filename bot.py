@@ -1076,3 +1076,16 @@ async def main():
 # if __name__ == '__main__':
 #     asyncio.run(main())
 
+def start_bot():
+    import asyncio
+    try:
+        asyncio.run(main())
+    except RuntimeError as e:
+        # Caso já exista um event loop rodando (como no Render/FastAPI), use esse loop
+        if str(e) == "This event loop is already running":
+            loop = asyncio.get_event_loop()
+            loop.create_task(main())
+        else:
+            raise
+
+
