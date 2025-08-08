@@ -1,8 +1,7 @@
 # keep_alive.py
-
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
-import asyncio
+import asyncio, os
 from bot import start_bot
 
 shutdown_event = asyncio.Event()
@@ -12,7 +11,7 @@ async def lifespan(app: FastAPI):
     await start_bot()  # inicia o bot em segundo plano
     try:
         yield
-        await shutdown_event.wait()  # mantém o app vivo
+        await shutdown_event.wait()
     finally:
         print("🔴 Encerrando aplicação")
 
@@ -22,6 +21,11 @@ app = FastAPI(lifespan=lifespan)
 def root():
     return {"status": "ok"}
 
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=10000)
+    port = int(os.getenv("PORT", "10000"))   # ⚠️ Render injeta PORT
+    uvicorn.run(app, host="0.0.0.0", port=port)

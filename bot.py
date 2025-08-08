@@ -1045,10 +1045,12 @@ async def main():
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Configurar menu de comandos
-    application.job_queue.run_once(
-        lambda context: configurar_menu_comandos(application),
-        when=1
-    )
+    # application.job_queue.run_once(
+    #     lambda context: configurar_menu_comandos(application),
+    #     when=1
+    # )
+    # Comandos assim que iniciar
+    application.post_init = lambda app: app.create_task(configurar_menu_comandos(app))
     
     # Adicionar handlers
     application.add_handler(CommandHandler("start", start))
@@ -1071,13 +1073,21 @@ async def main():
     print("🔒 Dados privados por usuário!")
     print("📊 Controle de parcelas automático!")
     print("⚡ Interface otimizada - digite apenas os dados após clicar nos botões!")
+
+    # Mantém reconexões e timeouts sob controle
+    await application.run_polling(
+        drop_pending_updates=True,
+        poll_interval=1.0,
+        allowed_updates=Update.ALL_TYPES,
+    )
     
     # Executar bot
-    await application.initialize()
-    await application.start()
-    print("Bot rodando...")
-    await application.updater.start_polling()
+    # await application.initialize()
+    # await application.start()
+    # print("Bot rodando...")
+    # await application.updater.start_polling()
 
 async def start_bot():
+    # roda em background junto do FastAPI
     asyncio.create_task(main())
 
