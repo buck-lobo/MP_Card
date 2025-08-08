@@ -1074,18 +1074,15 @@ async def main():
     print("📊 Controle de parcelas automático!")
     print("⚡ Interface otimizada - digite apenas os dados após clicar nos botões!")
 
-    # Mantém reconexões e timeouts sob controle
-    await application.run_polling(
+    # Executar bot
+    await application.initialize()
+    await application.start()
+    print("Bot rodando...")
+    await application.updater.start_polling(
         drop_pending_updates=True,
         poll_interval=1.0,
         allowed_updates=Update.ALL_TYPES,
     )
-    
-    # Executar bot
-    # await application.initialize()
-    # await application.start()
-    # print("Bot rodando...")
-    # await application.updater.start_polling()
 
 async def start_bot():
     # roda em background junto do FastAPI
