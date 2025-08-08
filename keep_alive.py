@@ -2,14 +2,19 @@
 
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
-from bot import start_bot  # importa a função que inicia o bot
+import asyncio
+from bot import start_bot
+
+shutdown_event = asyncio.Event()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Inicia o bot assim que o FastAPI levantar
-    await start_bot()
-    yield  # mantém o app vivo enquanto o Render quiser
-    # Você poderia colocar lógica para shutdown aqui, se quiser
+    await start_bot()  # inicia o bot em segundo plano
+    try:
+        yield
+        await shutdown_event.wait()  # mantém o app vivo
+    finally:
+        print("🔴 Encerrando aplicação")
 
 app = FastAPI(lifespan=lifespan)
 
