@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import asyncio
 import json
 import os
 import logging
@@ -1026,7 +1027,7 @@ async def processar_valor_personalizado(update: Update, context: ContextTypes.DE
     await soma(update, context)
     context.user_data['saldo'] = context.user_data.get('saldo', 0) + valor
 
-def main():
+async def main():
     """Função principal"""
     if BOT_TOKEN == "SEU_TOKEN_AQUI":
         print("❌ ERRO: Configure o token do bot no arquivo config.py")
@@ -1068,8 +1069,8 @@ def main():
     print("💸 Transferências com confirmação disponíveis!")
     
     # Executar bot
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    await application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
 

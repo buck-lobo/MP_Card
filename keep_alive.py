@@ -8,7 +8,6 @@ def read_root():
     return {"status":"Bot ativo"}
 
 def start_bot():
-    import bot
-    bot.main()
+    application.run_polling()
 
 threading.Thread(target=start_bot).start()
