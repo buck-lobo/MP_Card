@@ -1,7 +1,7 @@
-from fastapi import FastApi
+from fastapi import FastAPI
 import threading
 
-app = FastApi()
+app = FastAPI()
 
 @app.get("/")
 def read_root():
