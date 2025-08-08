@@ -1,13 +1,16 @@
 from fastapi import FastAPI
 import threading
+import asyncio
+from bot import main as start_bot  # sua função main atual do bot.py
 
 app = FastAPI()
 
 @app.get("/")
 def read_root():
-    return {"status":"Bot ativo"}
+    return {"status": "Bot está rodando."}
 
-def start_bot():
-    application.run_polling()
+def run_bot():
+    asyncio.run(start_bot())  # Executa seu bot na thread principal do bot
 
-threading.Thread(target=start_bot).start()
+# Iniciar o bot em uma thread separada
+threading.Thread(target=run_bot).start()
