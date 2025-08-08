@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# import asyncio
+import asyncio
 import json
 import os
 import logging
@@ -1077,15 +1077,13 @@ async def main():
 #     asyncio.run(main())
 
 def start_bot():
-    import asyncio
     try:
         asyncio.run(main())
     except RuntimeError as e:
-        # Caso já exista um event loop rodando (como no Render/FastAPI), use esse loop
-        if str(e) == "This event loop is already running":
+        # Se o loop já está rodando (como no FastAPI), executa o main no loop atual
+        if "already running" in str(e):
             loop = asyncio.get_event_loop()
             loop.create_task(main())
         else:
             raise
-
 
