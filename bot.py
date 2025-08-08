@@ -19,6 +19,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Estados para o modo de escuta
+ESTADO_NORMAL = "normal"
+ESTADO_AGUARDANDO_GASTO = "aguardando_gasto"
+ESTADO_AGUARDANDO_PAGAMENTO = "aguardando_pagamento"
+ESTADO_AGUARDANDO_CONSULTA_USUARIO = "aguardando_consulta_usuario"
+
 class CartaoCreditoBot:
     def __init__(self):
         self.data_file = DATA_FILE
@@ -306,6 +312,12 @@ def criar_menu_principal(user_id):
     
     return InlineKeyboardMarkup(keyboard)
 
+def criar_botao_cancelar():
+    """Cria botão para cancelar operação atual"""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("❌ Cancelar", callback_data="cancelar_operacao")
+    ]])
+
 async def configurar_menu_comandos(application):
     """Configura o menu de comandos do bot"""
     comandos = [
@@ -334,6 +346,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     
+    # Limpar estado do usuário
+    context.user_data.clear()
+    context.user_data['estado'] = ESTADO_NORMAL
+    
     # Registrar usuário
     cartao_bot.registrar_usuario(user_id, user.first_name, user.username)
     
@@ -359,6 +375,10 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /menu - Mostra o menu interativo"""
     user_id = update.effective_user.id
     
+    # Limpar estado do usuário
+    context.user_data.clear()
+    context.user_data['estado'] = ESTADO_NORMAL
+    
     # Registrar usuário
     cartao_bot.registrar_usuario(update.effective_user.id, update.effective_user.first_name, update.effective_user.username)
     
@@ -382,40 +402,75 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cartao_bot.registrar_usuario(user_id, user_name, query.from_user.username)
     
     if data == "menu_principal":
+        context.user_data['estado'] = ESTADO_NORMAL
         keyboard = criar_menu_principal(user_id)
         await query.edit_message_text(
             "💳 **Menu Principal**\n\nEscolha uma opção abaixo:",
             reply_markup=keyboard
         )
     
+    elif data == "cancelar_operacao":
+        context.user_data['estado'] = ESTADO_NORMAL
+        keyboard = criar_menu_principal(user_id)
+        await query.edit_message_text(
+            "❌ **Operação cancelada.**\n\n💳 **Menu Principal**\n\nEscolha uma opção abaixo:",
+            reply_markup=keyboard
+        )
+    
     elif data == "menu_adicionar_gasto":
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔙 Voltar", callback_data="menu_principal")
-        ]])
+        context.user_data['estado'] = ESTADO_AGUARDANDO_GASTO
+        keyboard = criar_botao_cancelar()
         
         await query.edit_message_text(
             "💳 **Adicionar Gasto**\n\n"
-            "Use o comando: `/gasto <descrição> <valor> [parcelas]`\n\n"
+            "Digite as informações do gasto no formato:\n"
+            "`<descrição> <valor> [parcelas]`\n\n"
             "**Exemplos:**\n"
-            "• `/gasto Almoço 25.50` - Gasto à vista\n"
-            "• `/gasto Notebook 1200.00 12` - 12 parcelas de R$ 100,00\n"
-            "• `/gasto Supermercado 89.90 1` - À vista (1 parcela)\n\n"
-            "💡 **Dica:** Se não informar parcelas, será considerado à vista (1 parcela).",
+            "• `Almoço 25.50` - Gasto à vista\n"
+            "• `Notebook 1200.00 12` - 12 parcelas de R$ 100,00\n"
+            "• `Supermercado 89.90 1` - À vista (1 parcela)\n\n"
+            "💡 **Dica:** Se não informar parcelas, será considerado à vista (1 parcela).\n\n"
+            "✏️ **Aguardando sua mensagem...**",
             reply_markup=keyboard
         )
     
     elif data == "menu_pagamento":
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔙 Voltar", callback_data="menu_principal")
-        ]])
+        context.user_data['estado'] = ESTADO_AGUARDANDO_PAGAMENTO
+        keyboard = criar_botao_cancelar()
         
         await query.edit_message_text(
             "💰 **Registrar Pagamento**\n\n"
-            "Use o comando: `/pagamento <valor> [descrição]`\n\n"
+            "Digite as informações do pagamento no formato:\n"
+            "`<valor> [descrição]`\n\n"
             "**Exemplos:**\n"
-            "• `/pagamento 150.00` - Pagamento simples\n"
-            "• `/pagamento 200.50 Pagamento fatura março` - Com descrição\n\n"
-            "💡 **Dica:** O pagamento será abatido do seu saldo devedor.",
+            "• `150.00` - Pagamento simples\n"
+            "• `200.50 Pagamento fatura março` - Com descrição\n\n"
+            "💡 **Dica:** O pagamento será abatido do seu saldo devedor.\n\n"
+            "✏️ **Aguardando sua mensagem...**",
+            reply_markup=keyboard
+        )
+    
+    elif data == "menu_consultar_usuario":
+        if user_id != ADMIN_ID:
+            await query.edit_message_text(
+                "❌ **Acesso negado!**\n\n🔒 Apenas administradores podem consultar usuários.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 Voltar", callback_data="menu_principal")
+                ]])
+            )
+            return
+        
+        context.user_data['estado'] = ESTADO_AGUARDANDO_CONSULTA_USUARIO
+        keyboard = criar_botao_cancelar()
+        
+        await query.edit_message_text(
+            "🔍 **Consultar Usuário - Administrador**\n\n"
+            "Digite o nome ou username do usuário que deseja consultar:\n\n"
+            "**Exemplos:**\n"
+            "• `João`\n"
+            "• `@maria`\n"
+            "• `pedro123`\n\n"
+            "✏️ **Aguardando sua mensagem...**",
             reply_markup=keyboard
         )
     
@@ -564,6 +619,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ajuda_text = """
 ❓ **Ajuda - Bot de Cartão de Crédito**
 
+**🎛️ Interface Otimizada:**
+• Clique nos botões do menu para ações rápidas
+• Após clicar, digite apenas as informações solicitadas
+• Não precisa repetir comandos após usar os botões
+
 **📋 Comandos principais:**
 • `/gasto <desc> <valor> [parcelas]` - Registrar gasto
 • `/pagamento <valor> [desc]` - Registrar pagamento
@@ -594,63 +654,91 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.edit_message_text(ajuda_text, reply_markup=keyboard)
 
-async def gasto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /gasto - Adiciona um novo gasto"""
+async def processar_mensagem_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Processa mensagens de texto baseado no estado atual do usuário"""
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name
+    texto = update.message.text.strip()
     
     # Registrar usuário
     cartao_bot.registrar_usuario(user_id, user_name, update.effective_user.username)
     
-    if len(context.args) < 2:
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💳 Menu Gastos", callback_data="menu_adicionar_gasto")],
-            [InlineKeyboardButton("🔙 Menu Principal", callback_data="menu_principal")]
-        ])
-        
+    estado = context.user_data.get('estado', ESTADO_NORMAL)
+    
+    if estado == ESTADO_AGUARDANDO_GASTO:
+        await processar_gasto_otimizado(update, context, texto)
+    elif estado == ESTADO_AGUARDANDO_PAGAMENTO:
+        await processar_pagamento_otimizado(update, context, texto)
+    elif estado == ESTADO_AGUARDANDO_CONSULTA_USUARIO:
+        await processar_consulta_usuario(update, context, texto)
+    else:
+        # Estado normal - mostrar menu
+        keyboard = criar_menu_principal(user_id)
         await update.message.reply_text(
-            "❌ **Uso incorreto!**\n\n"
-            "**Formato:** `/gasto <descrição> <valor> [parcelas]`\n\n"
-            "**Exemplos:**\n"
-            "• `/gasto Almoço 25.50`\n"
-            "• `/gasto Notebook 1200.00 12`\n"
-            "• `/gasto Supermercado 89.90 1`",
+            "💳 **Menu Principal**\n\nEscolha uma opção abaixo:",
             reply_markup=keyboard
         )
-        return
+
+async def processar_gasto_otimizado(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
+    """Processa gasto no modo otimizado"""
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name
     
     try:
-        # Extrair descrição (pode ter espaços)
-        descricao_parts = context.args[:-2] if len(context.args) > 2 else context.args[:-1]
-        descricao = " ".join(descricao_parts) if descricao_parts else context.args[0]
+        # Dividir o texto em partes
+        partes = texto.split()
         
-        # Extrair valor
-        valor_str = context.args[-2] if len(context.args) > 2 else context.args[-1]
+        if len(partes) < 2:
+            await update.message.reply_text(
+                "❌ **Formato incorreto!**\n\n"
+                "Use: `<descrição> <valor> [parcelas]`\n\n"
+                "**Exemplo:** `Almoço 25.50` ou `Notebook 1200.00 12`",
+                reply_markup=criar_botao_cancelar()
+            )
+            return
+        
+        # Extrair valor (sempre o penúltimo ou último elemento)
+        valor_str = partes[-2] if len(partes) > 2 else partes[-1]
         valor = Decimal(valor_str.replace(',', '.'))
         
-        # Extrair parcelas (opcional)
+        # Extrair parcelas (opcional, último elemento se for número)
         parcelas = 1
-        if len(context.args) > 2:
+        if len(partes) > 2:
             try:
-                parcelas = int(context.args[-1])
+                parcelas = int(partes[-1])
                 if parcelas < 1:
                     parcelas = 1
+                # Se conseguiu converter, a descrição vai até o antepenúltimo elemento
+                descricao = " ".join(partes[:-2])
             except ValueError:
-                # Se o último argumento não for um número, incluir na descrição
-                descricao = " ".join(context.args[:-1])
+                # Se não conseguiu converter, incluir na descrição
+                descricao = " ".join(partes[:-1])
                 parcelas = 1
+        else:
+            # Apenas descrição e valor
+            descricao = " ".join(partes[:-1])
+            parcelas = 1
         
         if valor <= 0:
-            await update.message.reply_text("❌ **Valor deve ser maior que zero!**")
+            await update.message.reply_text(
+                "❌ **Valor deve ser maior que zero!**",
+                reply_markup=criar_botao_cancelar()
+            )
             return
         
         if parcelas > 60:
-            await update.message.reply_text("❌ **Máximo de 60 parcelas permitido!**")
+            await update.message.reply_text(
+                "❌ **Máximo de 60 parcelas permitido!**",
+                reply_markup=criar_botao_cancelar()
+            )
             return
         
         # Adicionar gasto
         gasto_id = cartao_bot.adicionar_gasto(user_id, descricao, valor, parcelas)
         valor_parcela = valor / parcelas
+        
+        # Limpar estado
+        context.user_data['estado'] = ESTADO_NORMAL
         
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("💳 Adicionar Outro", callback_data="menu_adicionar_gasto")],
@@ -676,53 +764,44 @@ async def gasto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(texto_confirmacao, reply_markup=keyboard)
         
-    except (InvalidOperation, ValueError) as e:
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💳 Menu Gastos", callback_data="menu_adicionar_gasto")],
-            [InlineKeyboardButton("🔙 Menu Principal", callback_data="menu_principal")]
-        ])
-        
+    except (InvalidOperation, ValueError):
         await update.message.reply_text(
             "❌ **Erro nos dados informados!**\n\n"
             "Verifique se o valor está correto e as parcelas são um número inteiro.\n\n"
-            "**Formato:** `/gasto <descrição> <valor> [parcelas]`",
-            reply_markup=keyboard
+            "**Formato:** `<descrição> <valor> [parcelas]`",
+            reply_markup=criar_botao_cancelar()
         )
 
-async def pagamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /pagamento - Registra um pagamento"""
+async def processar_pagamento_otimizado(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
+    """Processa pagamento no modo otimizado"""
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name
     
-    # Registrar usuário
-    cartao_bot.registrar_usuario(user_id, user_name, update.effective_user.username)
-    
-    if len(context.args) < 1:
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💰 Menu Pagamentos", callback_data="menu_pagamento")],
-            [InlineKeyboardButton("🔙 Menu Principal", callback_data="menu_principal")]
-        ])
-        
-        await update.message.reply_text(
-            "❌ **Uso incorreto!**\n\n"
-            "**Formato:** `/pagamento <valor> [descrição]`\n\n"
-            "**Exemplos:**\n"
-            "• `/pagamento 150.00`\n"
-            "• `/pagamento 200.50 Pagamento fatura março`",
-            reply_markup=keyboard
-        )
-        return
-    
     try:
-        # Extrair valor
-        valor_str = context.args[0]
+        # Dividir o texto em partes
+        partes = texto.split()
+        
+        if len(partes) < 1:
+            await update.message.reply_text(
+                "❌ **Formato incorreto!**\n\n"
+                "Use: `<valor> [descrição]`\n\n"
+                "**Exemplo:** `150.00` ou `200.50 Pagamento fatura março`",
+                reply_markup=criar_botao_cancelar()
+            )
+            return
+        
+        # Extrair valor (primeiro elemento)
+        valor_str = partes[0]
         valor = Decimal(valor_str.replace(',', '.'))
         
-        # Extrair descrição (opcional)
-        descricao = " ".join(context.args[1:]) if len(context.args) > 1 else "Pagamento"
+        # Extrair descrição (resto dos elementos)
+        descricao = " ".join(partes[1:]) if len(partes) > 1 else "Pagamento"
         
         if valor <= 0:
-            await update.message.reply_text("❌ **Valor deve ser maior que zero!**")
+            await update.message.reply_text(
+                "❌ **Valor deve ser maior que zero!**",
+                reply_markup=criar_botao_cancelar()
+            )
             return
         
         # Calcular saldo antes do pagamento
@@ -733,6 +812,9 @@ async def pagamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Calcular novo saldo
         saldo_depois = cartao_bot.calcular_saldo_usuario(user_id)
+        
+        # Limpar estado
+        context.user_data['estado'] = ESTADO_NORMAL
         
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("💰 Registrar Outro", callback_data="menu_pagamento")],
@@ -762,24 +844,161 @@ async def pagamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(texto_confirmacao, reply_markup=keyboard)
         
     except (InvalidOperation, ValueError):
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💰 Menu Pagamentos", callback_data="menu_pagamento")],
-            [InlineKeyboardButton("🔙 Menu Principal", callback_data="menu_principal")]
-        ])
-        
         await update.message.reply_text(
             "❌ **Valor inválido!**\n\n"
             "Use apenas números.\n\n"
             "**Exemplos válidos:**\n"
-            "• `/pagamento 100`\n"
-            "• `/pagamento 150.50`",
+            "• `100`\n"
+            "• `150.50`",
+            reply_markup=criar_botao_cancelar()
+        )
+
+async def processar_consulta_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
+    """Processa consulta de usuário (apenas admin)"""
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        context.user_data['estado'] = ESTADO_NORMAL
+        await update.message.reply_text(
+            "❌ **Acesso negado!**",
+            reply_markup=criar_menu_principal(user_id)
+        )
+        return
+    
+    # Buscar usuário
+    termo_busca = texto.lower().replace('@', '')
+    usuarios = cartao_bot.listar_todos_usuarios()
+    
+    usuario_encontrado = None
+    for usuario in usuarios:
+        nome = usuario['name'].lower()
+        username = usuario.get('username', '').lower()
+        
+        if (termo_busca in nome or 
+            termo_busca == username or 
+            termo_busca in username):
+            usuario_encontrado = usuario
+            break
+    
+    # Limpar estado
+    context.user_data['estado'] = ESTADO_NORMAL
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔍 Consultar Outro", callback_data="menu_consultar_usuario")],
+        [InlineKeyboardButton("🔙 Menu Principal", callback_data="menu_principal")]
+    ])
+    
+    if usuario_encontrado:
+        user_id_consultado = int(usuario_encontrado['id'])
+        saldo = usuario_encontrado['saldo']
+        nome = usuario_encontrado['name']
+        username = usuario_encontrado.get('username', 'N/A')
+        
+        # Obter dados detalhados
+        gastos = cartao_bot.obter_gastos_usuario(user_id_consultado)
+        pagamentos = cartao_bot.obter_pagamentos_usuario(user_id_consultado)
+        valor_fatura, gastos_mes = cartao_bot.calcular_fatura_usuario(user_id_consultado)
+        
+        # Status do saldo
+        if saldo > 0:
+            emoji_saldo = "🔴"
+            status_saldo = f"Devedor: R$ {saldo:.2f}"
+        elif saldo < 0:
+            emoji_saldo = "💚"
+            status_saldo = f"Crédito: R$ {abs(saldo):.2f}"
+        else:
+            emoji_saldo = "⚖️"
+            status_saldo = "Quitado"
+        
+        texto_consulta = f"🔍 **Consulta de Usuário - Admin**\n\n"
+        texto_consulta += f"👤 **Nome:** {nome}\n"
+        texto_consulta += f"📱 **Username:** @{username}\n"
+        texto_consulta += f"{emoji_saldo} **Saldo:** {status_saldo}\n"
+        texto_consulta += f"💳 **Fatura atual:** R$ {valor_fatura:.2f}\n"
+        texto_consulta += f"📋 **Total de gastos:** {len(gastos)}\n"
+        texto_consulta += f"💸 **Total de pagamentos:** {len(pagamentos)}\n"
+        
+        await update.message.reply_text(texto_consulta, reply_markup=keyboard)
+    else:
+        await update.message.reply_text(
+            f"❌ **Usuário não encontrado!**\n\n"
+            f"Nenhum usuário encontrado com o termo: `{texto}`\n\n"
+            f"Tente buscar por nome ou username.",
             reply_markup=keyboard
         )
+
+# Manter comandos tradicionais para compatibilidade
+async def gasto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /gasto - Adiciona um novo gasto (modo tradicional)"""
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name
+    
+    # Limpar estado
+    context.user_data['estado'] = ESTADO_NORMAL
+    
+    # Registrar usuário
+    cartao_bot.registrar_usuario(user_id, user_name, update.effective_user.username)
+    
+    if len(context.args) < 2:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 Usar Menu Otimizado", callback_data="menu_adicionar_gasto")],
+            [InlineKeyboardButton("🔙 Menu Principal", callback_data="menu_principal")]
+        ])
+        
+        await update.message.reply_text(
+            "❌ **Uso incorreto!**\n\n"
+            "**Formato:** `/gasto <descrição> <valor> [parcelas]`\n\n"
+            "**Exemplos:**\n"
+            "• `/gasto Almoço 25.50`\n"
+            "• `/gasto Notebook 1200.00 12`\n\n"
+            "💡 **Dica:** Use o menu otimizado para uma experiência melhor!",
+            reply_markup=keyboard
+        )
+        return
+    
+    # Processar como antes (código do gasto original)
+    texto_args = " ".join(context.args)
+    await processar_gasto_otimizado(update, context, texto_args)
+
+async def pagamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /pagamento - Registra um pagamento (modo tradicional)"""
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name
+    
+    # Limpar estado
+    context.user_data['estado'] = ESTADO_NORMAL
+    
+    # Registrar usuário
+    cartao_bot.registrar_usuario(user_id, user_name, update.effective_user.username)
+    
+    if len(context.args) < 1:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💰 Usar Menu Otimizado", callback_data="menu_pagamento")],
+            [InlineKeyboardButton("🔙 Menu Principal", callback_data="menu_principal")]
+        ])
+        
+        await update.message.reply_text(
+            "❌ **Uso incorreto!**\n\n"
+            "**Formato:** `/pagamento <valor> [descrição]`\n\n"
+            "**Exemplos:**\n"
+            "• `/pagamento 150.00`\n"
+            "• `/pagamento 200.50 Pagamento fatura março`\n\n"
+            "💡 **Dica:** Use o menu otimizado para uma experiência melhor!",
+            reply_markup=keyboard
+        )
+        return
+    
+    # Processar como antes
+    texto_args = " ".join(context.args)
+    await processar_pagamento_otimizado(update, context, texto_args)
 
 async def saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /saldo - Mostra o saldo atual"""
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name
+    
+    # Limpar estado
+    context.user_data['estado'] = ESTADO_NORMAL
     
     # Registrar usuário
     cartao_bot.registrar_usuario(user_id, user_name, update.effective_user.username)
@@ -841,13 +1060,17 @@ async def main():
     # Adicionar handler para callbacks dos botões
     application.add_handler(CallbackQueryHandler(callback_handler))
     
+    # Adicionar handler para mensagens de texto (modo de escuta)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, processar_mensagem_texto))
+    
     # Adicionar handler de erro
     application.add_error_handler(error_handler)
     
-    print("💳 Bot de Controle de Cartão de Crédito iniciado! Pressione Ctrl+C para parar.")
+    print("💳 Bot de Controle de Cartão de Crédito OTIMIZADO iniciado! Pressione Ctrl+C para parar.")
     print("📱 Teste o bot enviando /start")
     print("🔒 Dados privados por usuário!")
     print("📊 Controle de parcelas automático!")
+    print("⚡ Interface otimizada - digite apenas os dados após clicar nos botões!")
     
     # Executar bot
     await application.initialize()
