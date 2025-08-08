@@ -1,16 +1,20 @@
+# keep_alive.py
+
 from fastapi import FastAPI
-import threading
+import uvicorn
 import asyncio
-from bot import main as start_bot  # sua função main atual do bot.py
+import threading
+from bot import main as bot_main
 
 app = FastAPI()
 
 @app.get("/")
-def read_root():
-    return {"status": "Bot está rodando."}
+async def root():
+    return {"status": "ok"}
 
-def run_bot():
-    asyncio.run(start_bot())  # Executa seu bot na thread principal do bot
+def run_web():
+    uvicorn.run("keep_alive:app", host="0.0.0.0", port=10000)
 
-# Iniciar o bot em uma thread separada
-threading.Thread(target=run_bot).start()
+if __name__ == "__main__":
+    threading.Thread(target=run_web, daemon=True).start()
+    asyncio.run(bot_main())
