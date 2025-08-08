@@ -3,18 +3,18 @@
 from fastapi import FastAPI
 import uvicorn
 import asyncio
-import threading
 from bot import main as bot_main
 
 app = FastAPI()
 
 @app.get("/")
 async def root():
-    return {"status": "ok"}
+    return {"status": "OK"}
 
-def run_web():
-    uvicorn.run("keep_alive:app", host="0.0.0.0", port=10000)
+# Bot será iniciado assim que o FastAPI subir
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(bot_main())  # executa o bot no mesmo loop do FastAPI
 
 if __name__ == "__main__":
-    threading.Thread(target=run_web, daemon=True).start()
-    asyncio.run(bot_main())
+    uvicorn.run("keep_alive:app", host="0.0.0.0", port=10000)
