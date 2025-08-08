@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import asyncio
+# import asyncio
 import json
 import os
 import logging
@@ -1071,6 +1071,6 @@ async def main():
     # Executar bot
     await application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if __name__ == '__main__':
-    asyncio.run(main())
+# if __name__ == '__main__':
+#     asyncio.run(main())
 
