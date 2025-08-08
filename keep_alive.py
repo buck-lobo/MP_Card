@@ -21,7 +21,7 @@ app = FastAPI(lifespan=lifespan)
 def root():
     return {"status": "ok"}
 
-@app.get("/healthz")
+@app.api_route("/healthz", methods=["GET", "HEAD"])
 def healthz():
     return {"ok": True}
 
