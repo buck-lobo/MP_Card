@@ -1069,21 +1069,19 @@ async def main():
     print("💸 Transferências com confirmação disponíveis!")
     
     # Executar bot
-    # await application.run_polling(allowed_updates=Update.ALL_TYPES)
-    await application.initialize()
-    await application.start()
+    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # await application.initialize()
+    # await application.start()
 
 # if __name__ == '__main__':
 #     asyncio.run(main())
 
 def start_bot():
     try:
-        asyncio.run(main())
-    except RuntimeError as e:
-        # Se o loop já está rodando (como no FastAPI), executa o main no loop atual
-        if "already running" in str(e):
-            loop = asyncio.get_event_loop()
-            loop.create_task(main())
-        else:
-            raise
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    loop.create_task(main())
 
