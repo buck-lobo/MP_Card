@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 saldo_data.json
 *.bkp
+firebase-credentials.json
