@@ -10,7 +10,17 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-from config import BOT_TOKEN, ADMIN_ID, DATA_FILE
+
+# Importações do Firebase
+import firebase_admin
+from firebase_admin import credentials, firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
+
+from config import (
+    BOT_TOKEN, ADMIN_ID, 
+    FIREBASE_PROJECT_ID, FIREBASE_CREDENTIALS_PATH, FIREBASE_CREDENTIALS_JSON,
+    COLLECTION_USUARIOS, COLLECTION_GASTOS, COLLECTION_PAGAMENTOS, COLLECTION_CONFIGURACOES
+)
 
 # Configurar logging
 logging.basicConfig(
@@ -25,124 +35,170 @@ ESTADO_AGUARDANDO_GASTO = "aguardando_gasto"
 ESTADO_AGUARDANDO_PAGAMENTO = "aguardando_pagamento"
 ESTADO_AGUARDANDO_CONSULTA_USUARIO = "aguardando_consulta_usuario"
 
-class CartaoCreditoBot:
+class FirebaseCartaoCreditoBot:
     def __init__(self):
-        self.data_file = DATA_FILE
-        self.dados = self.carregar_dados()
+        self.db = self._inicializar_firebase()
+        self._inicializar_configuracoes()
     
-    def carregar_dados(self):
-        """Carrega os dados do arquivo JSON"""
-        if os.path.exists(self.data_file):
-            try:
-                with open(self.data_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    # Converter strings de volta para Decimal nos valores monetários
-                    self._converter_decimais(data)
-                    return data
-            except (json.JSONDecodeError, FileNotFoundError):
-                logger.warning("Erro ao carregar dados. Iniciando com dados zerados.")
-                return self._estrutura_inicial()
-        return self._estrutura_inicial()
-    
-    def _estrutura_inicial(self):
-        """Retorna a estrutura inicial de dados"""
-        return {
-            "usuarios": {},
-            "gastos": {},
-            "pagamentos": {},
-            "configuracoes": {
-                "dia_vencimento": 10,  # Dia do vencimento da fatura
-                "mes_atual": datetime.now().month,
-                "ano_atual": datetime.now().year
-            }
-        }
-    
-    def _converter_decimais(self, data):
-        """Converte strings para Decimal nos dados carregados"""
-        # Converter gastos
-        for gasto_id, gasto in data.get("gastos", {}).items():
-            if "valor_total" in gasto:
-                gasto["valor_total"] = Decimal(gasto["valor_total"])
-            if "valor_parcela" in gasto:
-                gasto["valor_parcela"] = Decimal(gasto["valor_parcela"])
-        
-        # Converter pagamentos
-        for pagamento_id, pagamento in data.get("pagamentos", {}).items():
-            if "valor" in pagamento:
-                pagamento["valor"] = Decimal(pagamento["valor"])
-    
-    def salvar_dados(self):
-        """Salva os dados no arquivo JSON"""
+    def _inicializar_firebase(self):
+        """Inicializa a conexão com o Firebase"""
         try:
-            # Converter Decimal para string para serialização JSON
-            data_to_save = json.loads(json.dumps(self.dados, default=str))
+            # Verificar se o Firebase já foi inicializado
+            firebase_admin.get_app()
+            logger.info("Firebase já inicializado")
+        except ValueError:
+            # Firebase não foi inicializado ainda
+            if FIREBASE_CREDENTIALS_JSON:
+                # Usar credenciais via JSON string (para deploy)
+                cred_dict = json.loads(FIREBASE_CREDENTIALS_JSON)
+                cred = credentials.Certificate(cred_dict)
+                firebase_admin.initialize_app(cred, {
+                    'projectId': FIREBASE_PROJECT_ID,
+                })
+            elif FIREBASE_CREDENTIALS_PATH and os.path.exists(FIREBASE_CREDENTIALS_PATH):
+                # Usar arquivo de credenciais
+                cred = credentials.Certificate(FIREBASE_CREDENTIALS_PATH)
+                firebase_admin.initialize_app(cred, {
+                    'projectId': FIREBASE_PROJECT_ID,
+                })
+            else:
+                # Usar credenciais padrão do ambiente (para desenvolvimento local)
+                cred = credentials.ApplicationDefault()
+                firebase_admin.initialize_app(cred, {
+                    'projectId': FIREBASE_PROJECT_ID,
+                })
             
-            with open(self.data_file, 'w', encoding='utf-8') as f:
-                json.dump(data_to_save, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.error(f"Erro ao salvar dados: {e}")
+            logger.info("Firebase inicializado com sucesso")
+        
+        return firestore.client()
+    
+    def _inicializar_configuracoes(self):
+        """Inicializa configurações padrão no Firestore se não existirem"""
+        config_ref = self.db.collection(COLLECTION_CONFIGURACOES).document('global')
+        config_doc = config_ref.get()
+        
+        if not config_doc.exists:
+            configuracoes_iniciais = {
+                "dia_vencimento": 10,
+                "mes_atual": datetime.now().month,
+                "ano_atual": datetime.now().year,
+                "criado_em": firestore.SERVER_TIMESTAMP,
+                "atualizado_em": firestore.SERVER_TIMESTAMP
+            }
+            config_ref.set(configuracoes_iniciais)
+            logger.info("Configurações iniciais criadas no Firestore")
+    
+    def _decimal_para_float(self, obj):
+        """Converte Decimal para float para armazenamento no Firestore"""
+        if isinstance(obj, Decimal):
+            return float(obj)
+        elif isinstance(obj, dict):
+            return {k: self._decimal_para_float(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._decimal_para_float(item) for item in obj]
+        return obj
+    
+    def _float_para_decimal(self, obj):
+        """Converte float para Decimal após leitura do Firestore"""
+        if isinstance(obj, (int, float)) and not isinstance(obj, bool):
+            return Decimal(str(obj))
+        elif isinstance(obj, dict):
+            return {k: self._float_para_decimal(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._float_para_decimal(item) for item in obj]
+        return obj
     
     def registrar_usuario(self, user_id, user_name, username=None):
-        """Registra informações do usuário"""
-        if "usuarios" not in self.dados:
-            self.dados["usuarios"] = {}
-        
-        self.dados["usuarios"][str(user_id)] = {
-            "name": user_name,
-            "username": username,
-            "last_seen": int(time.time()),
-            "ativo": True
-        }
-        self.salvar_dados()
+        """Registra informações do usuário no Firestore"""
+        try:
+            user_ref = self.db.collection(COLLECTION_USUARIOS).document(str(user_id))
+            user_data = {
+                "name": user_name,
+                "username": username,
+                "last_seen": firestore.SERVER_TIMESTAMP,
+                "ativo": True,
+                "atualizado_em": firestore.SERVER_TIMESTAMP
+            }
+            
+            # Verificar se o usuário já existe
+            user_doc = user_ref.get()
+            if user_doc.exists:
+                # Atualizar apenas campos específicos
+                user_ref.update({
+                    "name": user_name,
+                    "username": username,
+                    "last_seen": firestore.SERVER_TIMESTAMP,
+                    "atualizado_em": firestore.SERVER_TIMESTAMP
+                })
+            else:
+                # Criar novo usuário
+                user_data["criado_em"] = firestore.SERVER_TIMESTAMP
+                user_ref.set(user_data)
+            
+            logger.info(f"Usuário {user_id} registrado/atualizado no Firestore")
+        except Exception as e:
+            logger.error(f"Erro ao registrar usuário {user_id}: {e}")
     
     def adicionar_gasto(self, user_id, descricao, valor_total, parcelas=1):
-        """Adiciona um novo gasto"""
-        gasto_id = f"{user_id}_{int(time.time())}"
-        valor_total = Decimal(str(valor_total))
-        valor_parcela = valor_total / parcelas
-        
-        gasto = {
-            "id": gasto_id,
-            "user_id": str(user_id),
-            "descricao": descricao,
-            "valor_total": valor_total,
-            "valor_parcela": valor_parcela,
-            "parcelas_total": parcelas,
-            "parcelas_pagas": 0,
-            "data_compra": datetime.now().isoformat(),
-            "ativo": True,
-            "mes_inicio": datetime.now().month,
-            "ano_inicio": datetime.now().year
-        }
-        
-        if "gastos" not in self.dados:
-            self.dados["gastos"] = {}
-        
-        self.dados["gastos"][gasto_id] = gasto
-        self.salvar_dados()
-        return gasto_id
+        """Adiciona um novo gasto no Firestore"""
+        try:
+            gasto_id = f"{user_id}_{int(time.time())}"
+            valor_total = Decimal(str(valor_total))
+            valor_parcela = valor_total / parcelas
+            
+            gasto_data = {
+                "id": gasto_id,
+                "user_id": str(user_id),
+                "descricao": descricao,
+                "valor_total": float(valor_total),
+                "valor_parcela": float(valor_parcela),
+                "parcelas_total": parcelas,
+                "parcelas_pagas": 0,
+                "data_compra": datetime.now(),
+                "ativo": True,
+                "mes_inicio": datetime.now().month,
+                "ano_inicio": datetime.now().year,
+                "criado_em": firestore.SERVER_TIMESTAMP,
+                "atualizado_em": firestore.SERVER_TIMESTAMP
+            }
+            
+            # Adicionar ao Firestore
+            gasto_ref = self.db.collection(COLLECTION_GASTOS).document(gasto_id)
+            gasto_ref.set(gasto_data)
+            
+            logger.info(f"Gasto {gasto_id} adicionado ao Firestore")
+            return gasto_id
+        except Exception as e:
+            logger.error(f"Erro ao adicionar gasto: {e}")
+            raise
     
     def adicionar_pagamento(self, user_id, valor, descricao=""):
-        """Adiciona um pagamento feito pelo usuário"""
-        pagamento_id = f"pag_{user_id}_{int(time.time())}"
-        valor = Decimal(str(valor))
-        
-        pagamento = {
-            "id": pagamento_id,
-            "user_id": str(user_id),
-            "valor": valor,
-            "descricao": descricao,
-            "data_pagamento": datetime.now().isoformat(),
-            "mes": datetime.now().month,
-            "ano": datetime.now().year
-        }
-        
-        if "pagamentos" not in self.dados:
-            self.dados["pagamentos"] = {}
-        
-        self.dados["pagamentos"][pagamento_id] = pagamento
-        self.salvar_dados()
-        return pagamento_id
+        """Adiciona um pagamento no Firestore"""
+        try:
+            pagamento_id = f"pag_{user_id}_{int(time.time())}"
+            valor = Decimal(str(valor))
+            
+            pagamento_data = {
+                "id": pagamento_id,
+                "user_id": str(user_id),
+                "valor": float(valor),
+                "descricao": descricao,
+                "data_pagamento": datetime.now(),
+                "mes": datetime.now().month,
+                "ano": datetime.now().year,
+                "criado_em": firestore.SERVER_TIMESTAMP,
+                "atualizado_em": firestore.SERVER_TIMESTAMP
+            }
+            
+            # Adicionar ao Firestore
+            pagamento_ref = self.db.collection(COLLECTION_PAGAMENTOS).document(pagamento_id)
+            pagamento_ref.set(pagamento_data)
+            
+            logger.info(f"Pagamento {pagamento_id} adicionado ao Firestore")
+            return pagamento_id
+        except Exception as e:
+            logger.error(f"Erro ao adicionar pagamento: {e}")
+            raise
     
     def calcular_fatura_usuario(self, user_id, mes=None, ano=None):
         """Calcula o valor da fatura de um usuário para um mês específico"""
@@ -155,16 +211,29 @@ class CartaoCreditoBot:
         total_fatura = Decimal('0')
         gastos_mes = []
         
-        for gasto_id, gasto in self.dados.get("gastos", {}).items():
-            if gasto["user_id"] != user_id_str or not gasto.get("ativo", True):
-                continue
+        try:
+            # Buscar gastos do usuário no Firestore
+            gastos_query = self.db.collection(COLLECTION_GASTOS).where(
+                filter=FieldFilter("user_id", "==", user_id_str)
+            ).where(
+                filter=FieldFilter("ativo", "==", True)
+            )
             
-            # Verificar se o gasto tem parcela no mês solicitado
-            if self._gasto_tem_parcela_no_mes(gasto, mes, ano):
-                total_fatura += gasto["valor_parcela"]
-                gastos_mes.append(gasto)
-        
-        return total_fatura, gastos_mes
+            gastos_docs = gastos_query.stream()
+            
+            for doc in gastos_docs:
+                gasto = doc.to_dict()
+                gasto = self._float_para_decimal(gasto)
+                
+                # Verificar se o gasto tem parcela no mês solicitado
+                if self._gasto_tem_parcela_no_mes(gasto, mes, ano):
+                    total_fatura += gasto["valor_parcela"]
+                    gastos_mes.append(gasto)
+            
+            return total_fatura, gastos_mes
+        except Exception as e:
+            logger.error(f"Erro ao calcular fatura do usuário {user_id}: {e}")
+            return Decimal('0'), []
     
     def _gasto_tem_parcela_no_mes(self, gasto, mes, ano):
         """Verifica se um gasto tem parcela a ser paga no mês especificado"""
@@ -185,26 +254,46 @@ class CartaoCreditoBot:
         """Calcula o saldo atual do usuário (gastos - pagamentos)"""
         user_id_str = str(user_id)
         
-        # Calcular total de gastos até agora
-        total_gastos = Decimal('0')
-        mes_atual = datetime.now().month
-        ano_atual = datetime.now().year
-        
-        for gasto_id, gasto in self.dados.get("gastos", {}).items():
-            if gasto["user_id"] != user_id_str or not gasto.get("ativo", True):
-                continue
+        try:
+            # Calcular total de gastos até agora
+            total_gastos = Decimal('0')
+            mes_atual = datetime.now().month
+            ano_atual = datetime.now().year
             
-            # Somar todas as parcelas que já venceram
-            parcelas_vencidas = self._calcular_parcelas_vencidas(gasto, mes_atual, ano_atual)
-            total_gastos += gasto["valor_parcela"] * parcelas_vencidas
-        
-        # Calcular total de pagamentos
-        total_pagamentos = Decimal('0')
-        for pagamento_id, pagamento in self.dados.get("pagamentos", {}).items():
-            if pagamento["user_id"] == user_id_str:
+            # Buscar gastos do usuário
+            gastos_query = self.db.collection(COLLECTION_GASTOS).where(
+                filter=FieldFilter("user_id", "==", user_id_str)
+            ).where(
+                filter=FieldFilter("ativo", "==", True)
+            )
+            
+            gastos_docs = gastos_query.stream()
+            
+            for doc in gastos_docs:
+                gasto = doc.to_dict()
+                gasto = self._float_para_decimal(gasto)
+                
+                # Somar todas as parcelas que já venceram
+                parcelas_vencidas = self._calcular_parcelas_vencidas(gasto, mes_atual, ano_atual)
+                total_gastos += gasto["valor_parcela"] * parcelas_vencidas
+            
+            # Calcular total de pagamentos
+            total_pagamentos = Decimal('0')
+            pagamentos_query = self.db.collection(COLLECTION_PAGAMENTOS).where(
+                filter=FieldFilter("user_id", "==", user_id_str)
+            )
+            
+            pagamentos_docs = pagamentos_query.stream()
+            
+            for doc in pagamentos_docs:
+                pagamento = doc.to_dict()
+                pagamento = self._float_para_decimal(pagamento)
                 total_pagamentos += pagamento["valor"]
-        
-        return total_gastos - total_pagamentos
+            
+            return total_gastos - total_pagamentos
+        except Exception as e:
+            logger.error(f"Erro ao calcular saldo do usuário {user_id}: {e}")
+            return Decimal('0')
     
     def _calcular_parcelas_vencidas(self, gasto, mes_atual, ano_atual):
         """Calcula quantas parcelas de um gasto já venceram"""
@@ -219,43 +308,96 @@ class CartaoCreditoBot:
         return min(max(0, meses_passados), parcelas_total)
     
     def obter_gastos_usuario(self, user_id):
-        """Obtém todos os gastos de um usuário"""
+        """Obtém todos os gastos de um usuário do Firestore"""
         user_id_str = str(user_id)
         gastos_usuario = []
         
-        for gasto_id, gasto in self.dados.get("gastos", {}).items():
-            if gasto["user_id"] == user_id_str and gasto.get("ativo", True):
+        try:
+            gastos_query = self.db.collection(COLLECTION_GASTOS).where(
+                filter=FieldFilter("user_id", "==", user_id_str)
+            ).where(
+                filter=FieldFilter("ativo", "==", True)
+            ).order_by("data_compra", direction=firestore.Query.DESCENDING)
+            
+            gastos_docs = gastos_query.stream()
+            
+            for doc in gastos_docs:
+                gasto = doc.to_dict()
+                gasto = self._float_para_decimal(gasto)
+                # Converter datetime para string ISO se necessário
+                if isinstance(gasto.get("data_compra"), datetime):
+                    gasto["data_compra"] = gasto["data_compra"].isoformat()
                 gastos_usuario.append(gasto)
-        
-        return sorted(gastos_usuario, key=lambda x: x["data_compra"], reverse=True)
+            
+            return gastos_usuario
+        except Exception as e:
+            logger.error(f"Erro ao obter gastos do usuário {user_id}: {e}")
+            return []
     
     def obter_pagamentos_usuario(self, user_id):
-        """Obtém todos os pagamentos de um usuário"""
+        """Obtém todos os pagamentos de um usuário do Firestore"""
         user_id_str = str(user_id)
         pagamentos_usuario = []
         
-        for pagamento_id, pagamento in self.dados.get("pagamentos", {}).items():
-            if pagamento["user_id"] == user_id_str:
+        try:
+            pagamentos_query = self.db.collection(COLLECTION_PAGAMENTOS).where(
+                filter=FieldFilter("user_id", "==", user_id_str)
+            ).order_by("data_pagamento", direction=firestore.Query.DESCENDING)
+            
+            pagamentos_docs = pagamentos_query.stream()
+            
+            for doc in pagamentos_docs:
+                pagamento = doc.to_dict()
+                pagamento = self._float_para_decimal(pagamento)
+                # Converter datetime para string ISO se necessário
+                if isinstance(pagamento.get("data_pagamento"), datetime):
+                    pagamento["data_pagamento"] = pagamento["data_pagamento"].isoformat()
                 pagamentos_usuario.append(pagamento)
-        
-        return sorted(pagamentos_usuario, key=lambda x: x["data_pagamento"], reverse=True)
+            
+            return pagamentos_usuario
+        except Exception as e:
+            logger.error(f"Erro ao obter pagamentos do usuário {user_id}: {e}")
+            return []
     
     def obter_info_usuario(self, user_id):
-        """Obtém informações de um usuário"""
-        return self.dados.get("usuarios", {}).get(str(user_id), None)
+        """Obtém informações de um usuário do Firestore"""
+        try:
+            user_ref = self.db.collection(COLLECTION_USUARIOS).document(str(user_id))
+            user_doc = user_ref.get()
+            
+            if user_doc.exists:
+                return user_doc.to_dict()
+            return None
+        except Exception as e:
+            logger.error(f"Erro ao obter info do usuário {user_id}: {e}")
+            return None
     
     def listar_todos_usuarios(self):
-        """Lista todos os usuários ativos (apenas para admin)"""
+        """Lista todos os usuários ativos do Firestore (apenas para admin)"""
         usuarios = []
-        for user_id, info in self.dados.get("usuarios", {}).items():
-            if info.get("ativo", True):
+        
+        try:
+            usuarios_query = self.db.collection(COLLECTION_USUARIOS).where(
+                filter=FieldFilter("ativo", "==", True)
+            )
+            
+            usuarios_docs = usuarios_query.stream()
+            
+            for doc in usuarios_docs:
+                user_data = doc.to_dict()
+                user_id = doc.id
+                
                 usuarios.append({
                     "id": user_id,
-                    "name": info["name"],
-                    "username": info.get("username"),
+                    "name": user_data.get("name", ""),
+                    "username": user_data.get("username"),
                     "saldo": self.calcular_saldo_usuario(int(user_id))
                 })
-        return usuarios
+            
+            return usuarios
+        except Exception as e:
+            logger.error(f"Erro ao listar usuários: {e}")
+            return []
     
     def obter_relatorio_completo(self):
         """Obtém relatório completo para administrador"""
@@ -266,23 +408,40 @@ class CartaoCreditoBot:
             "saldo_geral": Decimal('0')
         }
         
-        # Calcular totais
-        for gasto in self.dados.get("gastos", {}).values():
-            if gasto.get("ativo", True):
+        try:
+            # Calcular totais de gastos
+            gastos_query = self.db.collection(COLLECTION_GASTOS).where(
+                filter=FieldFilter("ativo", "==", True)
+            )
+            gastos_docs = gastos_query.stream()
+            
+            for doc in gastos_docs:
+                gasto = doc.to_dict()
+                gasto = self._float_para_decimal(gasto)
+                
                 parcelas_vencidas = self._calcular_parcelas_vencidas(
                     gasto, datetime.now().month, datetime.now().year
                 )
                 relatorio["total_gastos"] += gasto["valor_parcela"] * parcelas_vencidas
-        
-        for pagamento in self.dados.get("pagamentos", {}).values():
-            relatorio["total_pagamentos"] += pagamento["valor"]
-        
-        relatorio["saldo_geral"] = relatorio["total_gastos"] - relatorio["total_pagamentos"]
-        
-        return relatorio
+            
+            # Calcular totais de pagamentos
+            pagamentos_query = self.db.collection(COLLECTION_PAGAMENTOS)
+            pagamentos_docs = pagamentos_query.stream()
+            
+            for doc in pagamentos_docs:
+                pagamento = doc.to_dict()
+                pagamento = self._float_para_decimal(pagamento)
+                relatorio["total_pagamentos"] += pagamento["valor"]
+            
+            relatorio["saldo_geral"] = relatorio["total_gastos"] - relatorio["total_pagamentos"]
+            
+            return relatorio
+        except Exception as e:
+            logger.error(f"Erro ao obter relatório completo: {e}")
+            return relatorio
 
 # Instância global do bot
-cartao_bot = CartaoCreditoBot()
+cartao_bot = FirebaseCartaoCreditoBot()
 
 def criar_menu_principal(user_id):
     """Cria o teclado do menu principal"""
@@ -364,6 +523,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Histórico completo de gastos e pagamentos
 
 🔒 **Privacidade:** Você só vê seus próprios dados.
+☁️ **Dados seguros:** Armazenados no Firebase Cloud.
 
 Use o menu abaixo para navegar:
     """
@@ -497,7 +657,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"{emoji} **{user_name}**, seu saldo atual:\n\n"
             f"📊 **{texto_status}**\n\n"
-            f"Status: {status.title()}",
+            f"Status: {status.title()}\n"
+            f"☁️ Dados sincronizados com Firebase",
             reply_markup=keyboard
         )
     
@@ -538,7 +699,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 status_parcelas = f"{parcelas_pagas}/{gasto['parcelas_total']}"
                 
-                data_compra = datetime.fromisoformat(gasto['data_compra']).strftime("%d/%m/%y")
+                # Tratar data_compra que pode ser string ou datetime
+                if isinstance(gasto['data_compra'], str):
+                    data_compra = datetime.fromisoformat(gasto['data_compra']).strftime("%d/%m/%y")
+                else:
+                    data_compra = gasto['data_compra'].strftime("%d/%m/%y")
+                
                 texto_gastos += f"• **{gasto['descricao']}**\n"
                 texto_gastos += f"  💰 R$ {gasto['valor_total']:.2f} ({status_parcelas}x R$ {gasto['valor_parcela']:.2f})\n"
                 texto_gastos += f"  📅 {data_compra}\n\n"
@@ -562,7 +728,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total_pagamentos = Decimal('0')
             
             for pagamento in pagamentos[:8]:  # Mostrar apenas os primeiros 8
-                data_pagamento = datetime.fromisoformat(pagamento['data_pagamento']).strftime("%d/%m/%y")
+                # Tratar data_pagamento que pode ser string ou datetime
+                if isinstance(pagamento['data_pagamento'], str):
+                    data_pagamento = datetime.fromisoformat(pagamento['data_pagamento']).strftime("%d/%m/%y")
+                else:
+                    data_pagamento = pagamento['data_pagamento'].strftime("%d/%m/%y")
+                
                 descricao = pagamento.get('descricao', 'Pagamento')
                 texto_pagamentos += f"• **R$ {pagamento['valor']:.2f}**\n"
                 texto_pagamentos += f"  📝 {descricao}\n"
@@ -609,6 +780,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(relatorio['usuarios']) > 10:
             texto_relatorio += f"... e mais {len(relatorio['usuarios']) - 10} usuários."
         
+        texto_relatorio += f"\n☁️ Dados do Firebase Firestore"
+        
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("🔙 Voltar", callback_data="menu_principal")
         ]])
@@ -641,6 +814,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 **🔒 Privacidade:**
 • Você só vê seus próprios dados
 • Administrador tem acesso a relatórios gerais
+
+**☁️ Firebase:**
+• Dados armazenados com segurança na nuvem
+• Sincronização automática
+• Backup e recuperação garantidos
 
 **📅 Parcelas:**
 • O bot controla automaticamente as parcelas
@@ -751,7 +929,8 @@ async def processar_gasto_otimizado(update: Update, context: ContextTypes.DEFAUL
                 f"✅ **Gasto registrado com sucesso!**\n\n"
                 f"📝 **Descrição:** {descricao}\n"
                 f"💰 **Valor:** R$ {valor:.2f} (à vista)\n"
-                f"📅 **Data:** {datetime.now().strftime('%d/%m/%Y')}"
+                f"📅 **Data:** {datetime.now().strftime('%d/%m/%Y')}\n"
+                f"☁️ **Salvo no Firebase**"
             )
         else:
             texto_confirmacao = (
@@ -759,7 +938,8 @@ async def processar_gasto_otimizado(update: Update, context: ContextTypes.DEFAUL
                 f"📝 **Descrição:** {descricao}\n"
                 f"💰 **Valor total:** R$ {valor:.2f}\n"
                 f"📊 **Parcelas:** {parcelas}x R$ {valor_parcela:.2f}\n"
-                f"📅 **Data:** {datetime.now().strftime('%d/%m/%Y')}"
+                f"📅 **Data:** {datetime.now().strftime('%d/%m/%Y')}\n"
+                f"☁️ **Salvo no Firebase**"
             )
         
         await update.message.reply_text(texto_confirmacao, reply_markup=keyboard)
@@ -769,6 +949,13 @@ async def processar_gasto_otimizado(update: Update, context: ContextTypes.DEFAUL
             "❌ **Erro nos dados informados!**\n\n"
             "Verifique se o valor está correto e as parcelas são um número inteiro.\n\n"
             "**Formato:** `<descrição> <valor> [parcelas]`",
+            reply_markup=criar_botao_cancelar()
+        )
+    except Exception as e:
+        logger.error(f"Erro ao processar gasto: {e}")
+        await update.message.reply_text(
+            "❌ **Erro interno!**\n\n"
+            "Tente novamente em alguns instantes.",
             reply_markup=criar_botao_cancelar()
         )
 
@@ -838,7 +1025,8 @@ async def processar_pagamento_otimizado(update: Update, context: ContextTypes.DE
             f"💰 **Valor pago:** R$ {valor:.2f}\n"
             f"📝 **Descrição:** {descricao}\n"
             f"📅 **Data:** {datetime.now().strftime('%d/%m/%Y')}\n\n"
-            f"{emoji_saldo} **{texto_saldo}**"
+            f"{emoji_saldo} **{texto_saldo}**\n"
+            f"☁️ **Salvo no Firebase**"
         )
         
         await update.message.reply_text(texto_confirmacao, reply_markup=keyboard)
@@ -850,6 +1038,13 @@ async def processar_pagamento_otimizado(update: Update, context: ContextTypes.DE
             "**Exemplos válidos:**\n"
             "• `100`\n"
             "• `150.50`",
+            reply_markup=criar_botao_cancelar()
+        )
+    except Exception as e:
+        logger.error(f"Erro ao processar pagamento: {e}")
+        await update.message.reply_text(
+            "❌ **Erro interno!**\n\n"
+            "Tente novamente em alguns instantes.",
             reply_markup=criar_botao_cancelar()
         )
 
@@ -865,65 +1060,74 @@ async def processar_consulta_usuario(update: Update, context: ContextTypes.DEFAU
         )
         return
     
-    # Buscar usuário
-    termo_busca = texto.lower().replace('@', '')
-    usuarios = cartao_bot.listar_todos_usuarios()
-    
-    usuario_encontrado = None
-    for usuario in usuarios:
-        nome = usuario['name'].lower()
-        username = usuario.get('username', '').lower()
+    try:
+        # Buscar usuário
+        termo_busca = texto.lower().replace('@', '')
+        usuarios = cartao_bot.listar_todos_usuarios()
         
-        if (termo_busca in nome or 
-            termo_busca == username or 
-            termo_busca in username):
-            usuario_encontrado = usuario
-            break
-    
-    # Limpar estado
-    context.user_data['estado'] = ESTADO_NORMAL
-    
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔍 Consultar Outro", callback_data="menu_consultar_usuario")],
-        [InlineKeyboardButton("🔙 Menu Principal", callback_data="menu_principal")]
-    ])
-    
-    if usuario_encontrado:
-        user_id_consultado = int(usuario_encontrado['id'])
-        saldo = usuario_encontrado['saldo']
-        nome = usuario_encontrado['name']
-        username = usuario_encontrado.get('username', 'N/A')
+        usuario_encontrado = None
+        for usuario in usuarios:
+            nome = usuario['name'].lower()
+            username = usuario.get('username', '').lower() if usuario.get('username') else ''
+            
+            if (termo_busca in nome or 
+                termo_busca == username or 
+                termo_busca in username):
+                usuario_encontrado = usuario
+                break
         
-        # Obter dados detalhados
-        gastos = cartao_bot.obter_gastos_usuario(user_id_consultado)
-        pagamentos = cartao_bot.obter_pagamentos_usuario(user_id_consultado)
-        valor_fatura, gastos_mes = cartao_bot.calcular_fatura_usuario(user_id_consultado)
+        # Limpar estado
+        context.user_data['estado'] = ESTADO_NORMAL
         
-        # Status do saldo
-        if saldo > 0:
-            emoji_saldo = "🔴"
-            status_saldo = f"Devedor: R$ {saldo:.2f}"
-        elif saldo < 0:
-            emoji_saldo = "💚"
-            status_saldo = f"Crédito: R$ {abs(saldo):.2f}"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔍 Consultar Outro", callback_data="menu_consultar_usuario")],
+            [InlineKeyboardButton("🔙 Menu Principal", callback_data="menu_principal")]
+        ])
+        
+        if usuario_encontrado:
+            user_id_consultado = int(usuario_encontrado['id'])
+            saldo = usuario_encontrado['saldo']
+            nome = usuario_encontrado['name']
+            username = usuario_encontrado.get('username', 'N/A')
+            
+            # Obter dados detalhados
+            gastos = cartao_bot.obter_gastos_usuario(user_id_consultado)
+            pagamentos = cartao_bot.obter_pagamentos_usuario(user_id_consultado)
+            valor_fatura, gastos_mes = cartao_bot.calcular_fatura_usuario(user_id_consultado)
+            
+            # Status do saldo
+            if saldo > 0:
+                emoji_saldo = "🔴"
+                status_saldo = f"Devedor: R$ {saldo:.2f}"
+            elif saldo < 0:
+                emoji_saldo = "💚"
+                status_saldo = f"Crédito: R$ {abs(saldo):.2f}"
+            else:
+                emoji_saldo = "⚖️"
+                status_saldo = "Quitado"
+            
+            texto_consulta = f"🔍 **Consulta de Usuário - Admin**\n\n"
+            texto_consulta += f"👤 **Nome:** {nome}\n"
+            texto_consulta += f"📱 **Username:** @{username}\n"
+            texto_consulta += f"{emoji_saldo} **Saldo:** {status_saldo}\n"
+            texto_consulta += f"💳 **Fatura atual:** R$ {valor_fatura:.2f}\n"
+            texto_consulta += f"📋 **Total de gastos:** {len(gastos)}\n"
+            texto_consulta += f"💸 **Total de pagamentos:** {len(pagamentos)}\n"
+            texto_consulta += f"☁️ **Dados do Firebase**"
+            
+            await update.message.reply_text(texto_consulta, reply_markup=keyboard)
         else:
-            emoji_saldo = "⚖️"
-            status_saldo = "Quitado"
-        
-        texto_consulta = f"🔍 **Consulta de Usuário - Admin**\n\n"
-        texto_consulta += f"👤 **Nome:** {nome}\n"
-        texto_consulta += f"📱 **Username:** @{username}\n"
-        texto_consulta += f"{emoji_saldo} **Saldo:** {status_saldo}\n"
-        texto_consulta += f"💳 **Fatura atual:** R$ {valor_fatura:.2f}\n"
-        texto_consulta += f"📋 **Total de gastos:** {len(gastos)}\n"
-        texto_consulta += f"💸 **Total de pagamentos:** {len(pagamentos)}\n"
-        
-        await update.message.reply_text(texto_consulta, reply_markup=keyboard)
-    else:
+            await update.message.reply_text(
+                f"❌ **Usuário não encontrado!**\n\n"
+                f"Nenhum usuário encontrado com o termo: `{texto}`\n\n"
+                f"Tente buscar por nome ou username.",
+                reply_markup=keyboard
+            )
+    except Exception as e:
+        logger.error(f"Erro ao consultar usuário: {e}")
         await update.message.reply_text(
-            f"❌ **Usuário não encontrado!**\n\n"
-            f"Nenhum usuário encontrado com o termo: `{texto}`\n\n"
-            f"Tente buscar por nome ou username.",
+            "❌ **Erro interno!**\n\n"
+            "Tente novamente em alguns instantes.",
             reply_markup=keyboard
         )
 
@@ -1026,7 +1230,8 @@ async def saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"{emoji} **{user_name}**, seu saldo atual:\n\n"
         f"📊 **{texto_status}**\n\n"
-        f"Status: {status.title()}",
+        f"Status: {status.title()}\n"
+        f"☁️ Dados sincronizados com Firebase",
         reply_markup=keyboard
     )
 
@@ -1034,23 +1239,20 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manipula erros"""
     logger.error(f"Erro: {context.error}")
 
-async def main():
-    """Função principal"""
-    if BOT_TOKEN == "SEU_TOKEN_AQUI":
-        print("❌ ERRO: Configure o token do bot no arquivo config.py")
-        print("📝 Obtenha seu token em: https://t.me/BotFather")
+async def start_bot():
+    """Função para iniciar o bot (usada pelo keep_alive.py)"""
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN não configurado!")
         return
     
     # Criar aplicação
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Configurar menu de comandos
-    # application.job_queue.run_once(
-    #     lambda context: configurar_menu_comandos(application),
-    #     when=1
-    # )
-    # Comandos assim que iniciar
-    application.post_init = lambda app: app.create_task(configurar_menu_comandos(app))
+    application.job_queue.run_once(
+        lambda context: configurar_menu_comandos(application),
+        when=1
+    )
     
     # Adicionar handlers
     application.add_handler(CommandHandler("start", start))
@@ -1068,12 +1270,29 @@ async def main():
     # Adicionar handler de erro
     application.add_error_handler(error_handler)
     
-    print("💳 Bot de Controle de Cartão de Crédito OTIMIZADO iniciado! Pressione Ctrl+C para parar.")
-    print("📱 Teste o bot enviando /start")
-    print("🔒 Dados privados por usuário!")
-    print("📊 Controle de parcelas automático!")
-    print("⚡ Interface otimizada - digite apenas os dados após clicar nos botões!")
+    logger.info("💳 Bot de Controle de Cartão de Crédito com Firebase iniciado!")
+    logger.info("📱 Interface otimizada ativa!")
+    logger.info("☁️ Dados armazenados no Firebase Firestore!")
+    
+    # Executar bot
+    await application.run_polling(allowed_updates=Update.ALL_TYPES)
 
+async def main():
+    """Função principal"""
+    if not BOT_TOKEN:
+        print("❌ ERRO: Configure o BOT_TOKEN no arquivo .env")
+        print("📝 Obtenha seu token em: https://t.me/BotFather")
+        return
+    
+    if not FIREBASE_PROJECT_ID:
+        print("❌ ERRO: Configure o FIREBASE_PROJECT_ID no arquivo .env")
+        print("🔥 Configure seu projeto Firebase")
+        return
+    
+    print("💳 Bot de Controle de Cartão de Crédito com Firebase iniciando...")
+    print("📱 Interface otimizada ativa!")
+    print("☁️ Conectando ao Firebase Firestore...")
+    
     # Executar bot
     await application.initialize()
     await application.start()
