@@ -18,13 +18,15 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 
 from config import (
     BOT_TOKEN, ADMIN_ID, 
-    FIREBASE_PROJECT_ID, FIREBASE_CREDENTIALS_PATH, FIREBASE_CREDENTIALS_JSON,
+    FIREBASE_PROJECT_ID, FIREBASE_TYPE, FIREBASE_PRIVATE_KEY_ID, FIREBASE_PRIVATE_KEY,
+    FIREBASE_CLIENT_EMAIL, FIREBASE_CLIENT_ID, FIREBASE_AUTH_URI, FIREBASE_TOKEN_URI,
+    FIREBASE_AUTH_PROVIDER_X509_CERT_URL, FIREBASE_CLIENT_X509_CERT_URL, FIREBASE_UNIVERSE_DOMAIN,
     COLLECTION_USUARIOS, COLLECTION_GASTOS, COLLECTION_PAGAMENTOS, COLLECTION_CONFIGURACOES
 )
 
 # Configurar logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
@@ -48,21 +50,32 @@ class FirebaseCartaoCreditoBot:
             logger.info("Firebase já inicializado")
         except ValueError:
             # Firebase não foi inicializado ainda
-            if FIREBASE_CREDENTIALS_JSON:
-                # Usar credenciais via JSON string (para deploy)
-                cred_dict = json.loads(FIREBASE_CREDENTIALS_JSON)
+            if (FIREBASE_TYPE and FIREBASE_PROJECT_ID and FIREBASE_PRIVATE_KEY_ID and
+                FIREBASE_PRIVATE_KEY and FIREBASE_CLIENT_EMAIL and FIREBASE_CLIENT_ID and
+                FIREBASE_AUTH_URI and FIREBASE_TOKEN_URI and FIREBASE_AUTH_PROVIDER_X509_CERT_URL and
+                FIREBASE_CLIENT_X509_CERT_URL and FIREBASE_UNIVERSE_DOMAIN):
+                
+                # Construir o dicionário de credenciais a partir das variáveis de ambiente
+                cred_dict = {
+                    "type": FIREBASE_TYPE,
+                    "project_id": FIREBASE_PROJECT_ID,
+                    "private_key_id": FIREBASE_PRIVATE_KEY_ID,
+                    "private_key": FIREBASE_PRIVATE_KEY.replace("\\n", "\n"), # Substituir \n por quebra de linha real
+                    "client_email": FIREBASE_CLIENT_EMAIL,
+                    "client_id": FIREBASE_CLIENT_ID,
+                    "auth_uri": FIREBASE_AUTH_URI,
+                    "token_uri": FIREBASE_TOKEN_URI,
+                    "auth_provider_x509_cert_url": FIREBASE_AUTH_PROVIDER_X509_CERT_URL,
+                    "client_x509_cert_url": FIREBASE_CLIENT_X509_CERT_URL,
+                    "universe_domain": FIREBASE_UNIVERSE_DOMAIN
+                }
                 cred = credentials.Certificate(cred_dict)
                 firebase_admin.initialize_app(cred, {
                     'projectId': FIREBASE_PROJECT_ID,
                 })
-            elif FIREBASE_CREDENTIALS_PATH and os.path.exists(FIREBASE_CREDENTIALS_PATH):
-                # Usar arquivo de credenciais
-                cred = credentials.Certificate(FIREBASE_CREDENTIALS_PATH)
-                firebase_admin.initialize_app(cred, {
-                    'projectId': FIREBASE_PROJECT_ID,
-                })
             else:
-                # Usar credenciais padrão do ambiente (para desenvolvimento local)
+                # Fallback para credenciais padrão do ambiente (para desenvolvimento local sem todas as VAs)
+                logger.warning("Variáveis de ambiente do Firebase incompletas. Tentando credenciais padrão.")
                 cred = credentials.ApplicationDefault()
                 firebase_admin.initialize_app(cred, {
                     'projectId': FIREBASE_PROJECT_ID,
@@ -700,10 +713,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 status_parcelas = f"{parcelas_pagas}/{gasto['parcelas_total']}"
                 
                 # Tratar data_compra que pode ser string ou datetime
-                if isinstance(gasto['data_compra'], str):
-                    data_compra = datetime.fromisoformat(gasto['data_compra']).strftime("%d/%m/%y")
+                if isinstance(gasto.get("data_compra"), datetime):
+                    data_compra = gasto["data_compra"].strftime("%d/%m/%y")
                 else:
-                    data_compra = gasto['data_compra'].strftime("%d/%m/%y")
+                    data_compra = datetime.fromisoformat(gasto["data_compra"]).strftime("%d/%m/%y")
                 
                 texto_gastos += f"• **{gasto['descricao']}**\n"
                 texto_gastos += f"  💰 R$ {gasto['valor_total']:.2f} ({status_parcelas}x R$ {gasto['valor_parcela']:.2f})\n"
@@ -729,10 +742,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             for pagamento in pagamentos[:8]:  # Mostrar apenas os primeiros 8
                 # Tratar data_pagamento que pode ser string ou datetime
-                if isinstance(pagamento['data_pagamento'], str):
-                    data_pagamento = datetime.fromisoformat(pagamento['data_pagamento']).strftime("%d/%m/%y")
+                if isinstance(pagamento.get("data_pagamento"), datetime):
+                    data_pagamento = pagamento["data_pagamento"].strftime("%d/%m/%y")
                 else:
-                    data_pagamento = pagamento['data_pagamento'].strftime("%d/%m/%y")
+                    data_pagamento = datetime.fromisoformat(pagamento["data_pagamento"]).strftime("%d/%m/%y")
                 
                 descricao = pagamento.get('descricao', 'Pagamento')
                 texto_pagamentos += f"• **R$ {pagamento['valor']:.2f}**\n"
@@ -870,7 +883,7 @@ async def processar_gasto_otimizado(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_text(
                 "❌ **Formato incorreto!**\n\n"
                 "Use: `<descrição> <valor> [parcelas]`\n\n"
-                "**Exemplo:** `Almoço 25.50` ou `Notebook 1200.00 12`",
+                "**Exemplos:** `Almoço 25.50` ou `Notebook 1200.00 12`",
                 reply_markup=criar_botao_cancelar()
             )
             return
@@ -1243,6 +1256,10 @@ async def start_bot():
     """Função para iniciar o bot (usada pelo keep_alive.py)"""
     if not BOT_TOKEN:
         logger.error("BOT_TOKEN não configurado!")
+        return
+    
+    if not FIREBASE_PROJECT_ID:
+        logger.error("FIREBASE_PROJECT_ID não configurado!")
         return
     
     # Criar aplicação
