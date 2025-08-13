@@ -16,7 +16,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from config import (
+from config_firebase import (
     BOT_TOKEN, ADMIN_ID, 
     FIREBASE_PROJECT_ID, FIREBASE_TYPE, FIREBASE_PRIVATE_KEY_ID, FIREBASE_PRIVATE_KEY,
     FIREBASE_CLIENT_EMAIL, FIREBASE_CLIENT_ID, FIREBASE_AUTH_URI, FIREBASE_TOKEN_URI,
@@ -1252,24 +1252,25 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manipula erros"""
     logger.error(f"Erro: {context.error}")
 
-async def start_bot():
-    """Função para iniciar o bot (usada pelo keep_alive.py)"""
+async def run_telegram_bot():
+    """Função para configurar e iniciar o bot do Telegram"""
     if not BOT_TOKEN:
-        logger.error("BOT_TOKEN não configurado!")
+        logger.error("❌ ERRO: BOT_TOKEN não configurado!")
+        print("❌ ERRO: Configure o BOT_TOKEN no arquivo .env ou nas variáveis de ambiente do Render.")
+        print("📝 Obtenha seu token em: https://t.me/BotFather")
         return
     
     if not FIREBASE_PROJECT_ID:
-        logger.error("FIREBASE_PROJECT_ID não configurado!")
+        logger.error("❌ ERRO: FIREBASE_PROJECT_ID não configurado!")
+        print("❌ ERRO: Configure o FIREBASE_PROJECT_ID no arquivo .env ou nas variáveis de ambiente do Render.")
+        print("🔥 Configure seu projeto Firebase em: https://console.firebase.google.com/")
         return
     
     # Criar aplicação
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Configurar menu de comandos
-    application.job_queue.run_once(
-        lambda context: configurar_menu_comandos(application),
-        when=1
-    )
+    # Configurar menu de comandos assim que iniciar
+    application.post_init = lambda app: app.create_task(configurar_menu_comandos(app))
     
     # Adicionar handlers
     application.add_handler(CommandHandler("start", start))
@@ -1291,36 +1292,23 @@ async def start_bot():
     logger.info("📱 Interface otimizada ativa!")
     logger.info("☁️ Dados armazenados no Firebase Firestore!")
     
-    # Executar bot
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-async def main():
-    """Função principal"""
-    if not BOT_TOKEN:
-        print("❌ ERRO: Configure o BOT_TOKEN no arquivo .env")
-        print("📝 Obtenha seu token em: https://t.me/BotFather")
-        return
-    
-    if not FIREBASE_PROJECT_ID:
-        print("❌ ERRO: Configure o FIREBASE_PROJECT_ID no arquivo .env")
-        print("🔥 Configure seu projeto Firebase")
-        return
-    
-    print("💳 Bot de Controle de Cartão de Crédito com Firebase iniciando...")
-    print("📱 Interface otimizada ativa!")
-    print("☁️ Conectando ao Firebase Firestore...")
-    
-    # Executar bot
+    # Iniciar o polling de forma não bloqueante
     await application.initialize()
     await application.start()
-    print("Bot rodando...")
-    await application.updater.start_polling(
-        drop_pending_updates=True,
-        poll_interval=1.0,
-        allowed_updates=Update.ALL_TYPES,
-    )
+    await application.updater.start_polling(drop_pending_updates=True, poll_interval=1.0, allowed_updates=Update.ALL_TYPES)
+    logger.info("Bot Telegram polling iniciado.")
+    
+    # Manter o loop de eventos rodando para o polling
+    await application.updater.idle()
 
 async def start_bot():
-    # roda em background junto do FastAPI
-    asyncio.create_task(main())
+    """Função para iniciar o bot (usada pelo keep_alive.py para rodar em background)"""
+    asyncio.create_task(run_telegram_bot())
+
+# A função main() original do usuário, agora renomeada para run_telegram_bot()
+# e start_bot() para ser chamada pelo keep_alive.py
+
+if __name__ == '__main__':
+    # Para execução local direta (sem keep_alive.py)
+    asyncio.run(run_telegram_bot())
 
