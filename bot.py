@@ -474,11 +474,15 @@ def criar_menu_principal(user_id):
     ]
     
     # Adicionar opções de administrador se for admin
+    logger.info(f"DEBUG: Verificando ADMIN_ID. user_id={user_id} (type={type(user_id)}), ADMIN_ID={ADMIN_ID} (type={type(ADMIN_ID)})")
     if user_id == ADMIN_ID:
+        logger.info("DEBUG: Usuário é ADMIN. Adicionando opções de admin.")
         keyboard.append([
             InlineKeyboardButton("👥 Relatório Geral", callback_data="menu_relatorio_geral"),
             InlineKeyboardButton("🔍 Consultar Usuário", callback_data="menu_consultar_usuario")
         ])
+    else:
+        logger.info("DEBUG: Usuário NÃO é ADMIN.")
     
     keyboard.append([InlineKeyboardButton("❓ Ajuda", callback_data="menu_ajuda")])
     
@@ -624,7 +628,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif data == "menu_consultar_usuario":
+        logger.info(f"DEBUG: Tentativa de acesso a menu_consultar_usuario. user_id={user_id} (type={type(user_id)}), ADMIN_ID={ADMIN_ID} (type={type(ADMIN_ID)})")
         if user_id != ADMIN_ID:
+            logger.info("DEBUG: Acesso negado para menu_consultar_usuario.")
             await query.edit_message_text(
                 "❌ **Acesso negado!**\n\n🔒 Apenas administradores podem consultar usuários.",
                 reply_markup=InlineKeyboardMarkup([[
@@ -632,6 +638,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]])
             )
             return
+        logger.info("DEBUG: Acesso permitido para menu_consultar_usuario.")
         
         context.user_data['estado'] = ESTADO_AGUARDANDO_CONSULTA_USUARIO
         keyboard = criar_botao_cancelar()
@@ -767,7 +774,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(texto_pagamentos, reply_markup=keyboard)
     
     elif data == "menu_relatorio_geral":
+        logger.info(f"DEBUG: Tentativa de acesso a menu_relatorio_geral. user_id={user_id} (type={type(user_id)}), ADMIN_ID={ADMIN_ID} (type={type(ADMIN_ID)})")
         if user_id != ADMIN_ID:
+            logger.info("DEBUG: Acesso negado para menu_relatorio_geral.")
             await query.edit_message_text(
                 "❌ **Acesso negado!**\n\n🔒 Apenas administradores podem acessar relatórios gerais.",
                 reply_markup=InlineKeyboardMarkup([[
@@ -775,6 +784,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]])
             )
             return
+        logger.info("DEBUG: Acesso permitido para menu_relatorio_geral.")
         
         relatorio = cartao_bot.obter_relatorio_completo()
         
@@ -1065,13 +1075,16 @@ async def processar_consulta_usuario(update: Update, context: ContextTypes.DEFAU
     """Processa consulta de usuário (apenas admin)"""
     user_id = update.effective_user.id
     
+    logger.info(f"DEBUG: Tentativa de acesso a processar_consulta_usuario. user_id={user_id} (type={type(user_id)}), ADMIN_ID={ADMIN_ID} (type={type(ADMIN_ID)})")
     if user_id != ADMIN_ID:
+        logger.info("DEBUG: Acesso negado para processar_consulta_usuario.")
         context.user_data['estado'] = ESTADO_NORMAL
         await update.message.reply_text(
             "❌ **Acesso negado!**",
             reply_markup=criar_menu_principal(user_id)
         )
         return
+    logger.info("DEBUG: Acesso permitido para processar_consulta_usuario.")
     
     try:
         # Buscar usuário
@@ -1297,6 +1310,9 @@ async def run_telegram_bot():
     await application.start()
     await application.updater.start_polling(drop_pending_updates=True, poll_interval=1.0, allowed_updates=Update.ALL_TYPES)
     logger.info("Bot Telegram polling iniciado.")
+    
+    # Manter o loop de eventos rodando para o polling
+    # await application.updater.idle() # Removido conforme correção anterior
 
 async def start_bot():
     """Função para iniciar o bot (usada pelo keep_alive.py para rodar em background)"""
