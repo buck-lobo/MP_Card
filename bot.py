@@ -1297,9 +1297,6 @@ async def run_telegram_bot():
     await application.start()
     await application.updater.start_polling(drop_pending_updates=True, poll_interval=1.0, allowed_updates=Update.ALL_TYPES)
     logger.info("Bot Telegram polling iniciado.")
-    
-    # Manter o loop de eventos rodando para o polling
-    await application.updater.idle()
 
 async def start_bot():
     """Função para iniciar o bot (usada pelo keep_alive.py para rodar em background)"""
