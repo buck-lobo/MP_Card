@@ -593,18 +593,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = criar_botao_cancelar()
         
         await query.edit_message_text(
-            "💳 **Adicionar Gasto**\n\n"
+            "💳 <b>Adicionar Gasto</b>\n\n"
             "Digite as informações do gasto no formato:\n"
-            "`<descrição> <valor> [parcelas]`\n\n"
-            "**Exemplos:**\n"
-            "• `Almoço 25.50` - Gasto à vista\n"
-            "• `Notebook 1200.00 12` - 12 parcelas de R$ 100,00\n"
-            "• `Supermercado 89.90 1` - À vista (1 parcela)\n\n"
-            "💡 **Dica:** Se não informar parcelas, será considerado à vista (1 parcela).\n\n"
-            "✏️ **Aguardando sua mensagem...**",
+            "<code>&lt;descrição&gt; &lt;valor&gt; [parcelas]</code>\n\n"
+            "<b>Exemplos:</b>\n"
+            "• <code>Almoço 25.50</code> - Gasto à vista\n"
+            "• <code>Notebook 1200.00 12</code> - 12 parcelas de R$ 100,00\n"
+            "• <code>Supermercado 89.90 1</code> - À vista (1 parcela)\n\n"
+            "💡 <b>Dica:</b> Se não informar parcelas, será considerado à vista (1 parcela).\n\n"
+            "✏️ <b>Aguardando sua mensagem...</b>",
             reply_markup=keyboard,
-            parse_mode="MarkdownV2"
+            parse_mode="HTML"
         )
+
     
     elif data == "menu_pagamento":
         context.user_data['estado'] = ESTADO_AGUARDANDO_PAGAMENTO
