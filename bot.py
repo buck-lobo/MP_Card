@@ -2,11 +2,9 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
-import json
-import os
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
@@ -604,7 +602,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• `Supermercado 89.90 1` - À vista (1 parcela)\n\n"
             "💡 **Dica:** Se não informar parcelas, será considerado à vista (1 parcela).\n\n"
             "✏️ **Aguardando sua mensagem...**",
-            reply_markup=keyboard
+            reply_markup=keyboard,
+            parse_mode="MarkdownV2"
         )
     
     elif data == "menu_pagamento":
