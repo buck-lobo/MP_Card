@@ -526,21 +526,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_message = f"""
 💳 Olá {user.first_name}! Bem-vindo ao Bot de Controle de Cartão de Crédito!
 
-🎯 **Funcionalidades:**
+🎯 <b>Funcionalidades:</b>
 • Registrar gastos com descrição e parcelas
 • Acompanhar saldo devedor
 • Registrar pagamentos
 • Ver fatura mensal
 • Histórico completo de gastos e pagamentos
 
-🔒 **Privacidade:** Você só vê seus próprios dados.
-☁️ **Dados seguros:** Armazenados no Firebase Cloud.
+🔒 <b>Privacidade:</b> Você só vê seus próprios dados.
+☁️ <b>Dados seguros:</b> Armazenados no Firebase Cloud.
 
 Use o menu abaixo para navegar:
-    """
-    
+"""
+
     keyboard = criar_menu_principal(user_id)
-    await update.message.reply_text(welcome_message, reply_markup=keyboard)
+    await update.message.reply_text(
+        welcome_message,
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /menu - Mostra o menu interativo"""
@@ -556,8 +561,9 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = criar_menu_principal(user_id)
     
     await update.message.reply_text(
-        "💳 **Menu Principal**\n\nEscolha uma opção abaixo:",
-        reply_markup=keyboard
+        "💳 <b>Menu Principal</b>\n\nEscolha uma opção abaixo:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
     )
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -576,16 +582,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['estado'] = ESTADO_NORMAL
         keyboard = criar_menu_principal(user_id)
         await query.edit_message_text(
-            "💳 **Menu Principal**\n\nEscolha uma opção abaixo:",
-            reply_markup=keyboard
+            "💳 <b>Menu Principal</b>\n\nEscolha uma opção abaixo:",
+            reply_markup=keyboard,
+            parse_mode="HTML"
         )
     
     elif data == "cancelar_operacao":
         context.user_data['estado'] = ESTADO_NORMAL
         keyboard = criar_menu_principal(user_id)
         await query.edit_message_text(
-            "❌ **Operação cancelada.**\n\n💳 **Menu Principal**\n\nEscolha uma opção abaixo:",
-            reply_markup=keyboard
+            "❌ <b>Operação cancelada.</b>\n\n💳 <b>Menu Principal</b>\n\nEscolha uma opção abaixo:",
+            reply_markup=keyboard,
+            parse_mode="HTML"
         )
     
     elif data == "menu_adicionar_gasto":
@@ -612,24 +620,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = criar_botao_cancelar()
         
         await query.edit_message_text(
-            "💰 **Registrar Pagamento**\n\n"
+            "💰 <b>Registrar Pagamento</b>\n\n"
             "Digite as informações do pagamento no formato:\n"
-            "`<valor> [descrição]`\n\n"
-            "**Exemplos:**\n"
-            "• `150.00` - Pagamento simples\n"
-            "• `200.50 Pagamento fatura março` - Com descrição\n\n"
-            "💡 **Dica:** O pagamento será abatido do seu saldo devedor.\n\n"
-            "✏️ **Aguardando sua mensagem...**",
-            reply_markup=keyboard
+            "<code>&lt;valor&gt; [descrição]</code>\n\n"
+            "<b>Exemplos:</b>\n"
+            "• <code>150.00</code> - Pagamento simples\n"
+            "• <code>200.50 Pagamento fatura março</code> - Com descrição\n\n"
+            "💡 <b>Dica:</b> O pagamento será abatido do seu saldo devedor.\n\n"
+            "✏️ <b>Aguardando sua mensagem...</b>",
+            reply_markup=keyboard,
+            parse_mode="HTML"
         )
     
     elif data == "menu_consultar_usuario":
         if user_id != ADMIN_ID:
             await query.edit_message_text(
-                "❌ **Acesso negado!**\n\n🔒 Apenas administradores podem consultar usuários.",
+                "❌ <b>Acesso negado!</b>\n\n🔒 Apenas administradores podem consultar usuários.",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🔙 Voltar", callback_data="menu_principal")
-                ]])
+                ]]),
+                parse_mode="HTML"
             )
             return
         
@@ -637,14 +647,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = criar_botao_cancelar()
         
         await query.edit_message_text(
-            "🔍 **Consultar Usuário - Administrador**\n\n"
+            "🔍 <b>Consultar Usuário - Administrador</b>\n\n"
             "Digite o nome ou username do usuário que deseja consultar:\n\n"
-            "**Exemplos:**\n"
+            "<b>Exemplos:</b>\n"
             "• `João`\n"
             "• `@maria`\n"
             "• `pedro123`\n\n"
-            "✏️ **Aguardando sua mensagem...**",
-            reply_markup=keyboard
+            "✏️ <b>Aguardando sua mensagem...</b>",
+            reply_markup=keyboard,
+            parse_mode="HTML"
         )
     
     elif data == "menu_meu_saldo":
@@ -668,11 +679,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]])
         
         await query.edit_message_text(
-            f"{emoji} **{user_name}**, seu saldo atual:\n\n"
-            f"📊 **{texto_status}**\n\n"
+            f"{emoji} <b>{user_name}</b>, seu saldo atual:\n\n"
+            f"📊 <b>{texto_status}</b>\n\n"
             f"Status: {status.title()}\n"
             f"☁️ Dados sincronizados com Firebase",
-            reply_markup=keyboard
+            reply_markup=keyboard,
+            parse_mode="HTML"
         )
     
     elif data == "menu_fatura_atual":
@@ -681,9 +693,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         valor_fatura, gastos_mes = cartao_bot.calcular_fatura_usuario(user_id, mes_atual, ano_atual)
         
         if valor_fatura > 0:
-            texto_fatura = f"💳 **Fatura de {mes_atual:02d}/{ano_atual}**\n\n"
-            texto_fatura += f"💰 **Total a pagar:** R$ {valor_fatura:.2f}\n\n"
-            texto_fatura += f"📋 **Gastos do mês ({len(gastos_mes)} itens):**\n"
+            texto_fatura = f"💳 <b>Fatura de {mes_atual:02d}/{ano_atual}</b>\n\n"
+            texto_fatura += f"💰 <b>Total a pagar:</b> R$ {valor_fatura:.2f}\n\n"
+            texto_fatura += f"📋 <b>Gastos do mês ({len(gastos_mes)} itens):</b>\n"
             
             for gasto in gastos_mes[:5]:  # Mostrar apenas os primeiros 5
                 texto_fatura += f"• {gasto['descricao']}: R$ {gasto['valor_parcela']:.2f}\n"
@@ -691,20 +703,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(gastos_mes) > 5:
                 texto_fatura += f"... e mais {len(gastos_mes) - 5} itens.\n"
         else:
-            texto_fatura = f"💳 **Fatura de {mes_atual:02d}/{ano_atual}**\n\n"
-            texto_fatura += "✅ **Nenhum gasto neste mês!**"
+            texto_fatura = f"💳 <b>Fatura de {mes_atual:02d}/{ano_atual}</b>\n\n"
+            texto_fatura += "✅ <b>Nenhum gasto neste mês!</b>"
         
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("🔙 Voltar", callback_data="menu_principal")
         ]])
         
-        await query.edit_message_text(texto_fatura, reply_markup=keyboard)
+        await query.edit_message_text(texto_fatura, reply_markup=keyboard, parse_mode="HTML")
     
     elif data == "menu_meus_gastos":
         gastos = cartao_bot.obter_gastos_usuario(user_id)
         
         if gastos:
-            texto_gastos = f"📋 **Meus Gastos ({len(gastos)} itens)**\n\n"
+            texto_gastos = f"📋 <b>Meus Gastos ({len(gastos)} itens)</b>\n\n"
             
             for gasto in gastos[:8]:  # Mostrar apenas os primeiros 8
                 parcelas_pagas = cartao_bot._calcular_parcelas_vencidas(
@@ -718,26 +730,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     data_compra = datetime.fromisoformat(gasto["data_compra"]).strftime("%d/%m/%y")
                 
-                texto_gastos += f"• **{gasto['descricao']}**\n"
+                texto_gastos += f"• <b>{gasto['descricao']}</b>\n"
                 texto_gastos += f"  💰 R$ {gasto['valor_total']:.2f} ({status_parcelas}x R$ {gasto['valor_parcela']:.2f})\n"
                 texto_gastos += f"  📅 {data_compra}\n\n"
             
             if len(gastos) > 8:
                 texto_gastos += f"... e mais {len(gastos) - 8} gastos."
         else:
-            texto_gastos = "📋 **Meus Gastos**\n\n✅ Nenhum gasto registrado ainda."
+            texto_gastos = "📋 <b>Meus Gastos</b>\n\n✅ Nenhum gasto registrado ainda."
         
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("🔙 Voltar", callback_data="menu_principal")
         ]])
         
-        await query.edit_message_text(texto_gastos, reply_markup=keyboard)
+        await query.edit_message_text(texto_gastos, reply_markup=keyboard,parse_mode="HTML")
     
     elif data == "menu_meus_pagamentos":
         pagamentos = cartao_bot.obter_pagamentos_usuario(user_id)
         
         if pagamentos:
-            texto_pagamentos = f"💸 **Meus Pagamentos ({len(pagamentos)} itens)**\n\n"
+            texto_pagamentos = f"💸 <b>Meus Pagamentos ({len(pagamentos)} itens)</b>\n\n"
             total_pagamentos = Decimal('0')
             
             for pagamento in pagamentos[:8]:  # Mostrar apenas os primeiros 8
@@ -748,7 +760,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     data_pagamento = datetime.fromisoformat(pagamento["data_pagamento"]).strftime("%d/%m/%y")
                 
                 descricao = pagamento.get('descricao', 'Pagamento')
-                texto_pagamentos += f"• **R$ {pagamento['valor']:.2f}**\n"
+                texto_pagamentos += f"• <b>R$ {pagamento['valor']:.2f}</b>\n"
                 texto_pagamentos += f"  📝 {descricao}\n"
                 texto_pagamentos += f"  📅 {data_pagamento}\n\n"
                 total_pagamentos += pagamento['valor']
@@ -756,39 +768,39 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(pagamentos) > 8:
                 texto_pagamentos += f"... e mais {len(pagamentos) - 8} pagamentos.\n\n"
             
-            texto_pagamentos += f"💰 **Total pago:** R$ {total_pagamentos:.2f}"
+            texto_pagamentos += f"💰 <b>Total pago:</b> R$ {total_pagamentos:.2f}"
         else:
-            texto_pagamentos = "💸 **Meus Pagamentos**\n\n✅ Nenhum pagamento registrado ainda."
+            texto_pagamentos = "💸 <b>Meus Pagamentos</b>\n\n✅ Nenhum pagamento registrado ainda."
         
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("🔙 Voltar", callback_data="menu_principal")
         ]])
         
-        await query.edit_message_text(texto_pagamentos, reply_markup=keyboard)
-    
+        await query.edit_message_text(texto_pagamentos, reply_markup=keyboard, parse_mode="HTML")    
     elif data == "menu_relatorio_geral":
         if user_id != ADMIN_ID:
             await query.edit_message_text(
-                "❌ **Acesso negado!**\n\n🔒 Apenas administradores podem acessar relatórios gerais.",
+                "❌ <b>Acesso negado!</b>\n\n🔒 Apenas administradores podem acessar relatórios gerais.",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🔙 Voltar", callback_data="menu_principal")
-                ]])
+                ]]),
+                parse_mode="HTML"
             )
             return
         
         relatorio = cartao_bot.obter_relatorio_completo()
         
-        texto_relatorio = "👥 **Relatório Geral - Administrador**\n\n"
-        texto_relatorio += f"💳 **Total em gastos:** R$ {relatorio['total_gastos']:.2f}\n"
-        texto_relatorio += f"💰 **Total em pagamentos:** R$ {relatorio['total_pagamentos']:.2f}\n"
-        texto_relatorio += f"📊 **Saldo geral:** R$ {relatorio['saldo_geral']:.2f}\n\n"
-        texto_relatorio += f"👥 **Usuários ({len(relatorio['usuarios'])}):**\n"
+        texto_relatorio = "👥 <b>Relatório Geral - Administrador</b>\n\n"
+        texto_relatorio += f"💳 <b>Total em gastos:</b> R$ {relatorio['total_gastos']:.2f}\n"
+        texto_relatorio += f"💰 <b>Total em pagamentos:</b> R$ {relatorio['total_pagamentos']:.2f}\n"
+        texto_relatorio += f"📊 <b>Saldo geral:</b> R$ {relatorio['saldo_geral']:.2f}\n\n"
+        texto_relatorio += f"👥 <b>Usuários ({len(relatorio['usuarios'])}):</b>\n"
         
         for usuario in relatorio['usuarios'][:10]:  # Mostrar apenas os primeiros 10
             nome = usuario['name']
             saldo = usuario['saldo']
             emoji_saldo = "🔴" if saldo > 0 else "💚" if saldo < 0 else "⚖️"
-            texto_relatorio += f"{emoji_saldo} **{nome}:** R$ {saldo:.2f}\n"
+            texto_relatorio += f"{emoji_saldo} <b>{nome}:</b> R$ {saldo:.2f}\n"
         
         if len(relatorio['usuarios']) > 10:
             texto_relatorio += f"... e mais {len(relatorio['usuarios']) - 10} usuários."
@@ -799,51 +811,52 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🔙 Voltar", callback_data="menu_principal")
         ]])
         
-        await query.edit_message_text(texto_relatorio, reply_markup=keyboard)
+        await query.edit_message_text(texto_relatorio, reply_markup=keyboard, parse_mode="HTML")
     
     elif data == "menu_ajuda":
         ajuda_text = """
-❓ **Ajuda - Bot de Cartão de Crédito**
+❓ <b>Ajuda - Bot de Cartão de Crédito</b>
 
-**🎛️ Interface Otimizada:**
-• Clique nos botões do menu para ações rápidas
-• Após clicar, digite apenas as informações solicitadas
-• Não precisa repetir comandos após usar os botões
+<b>🎛️ Interface Otimizada:</b><br>
+• Clique nos botões do menu para ações rápidas<br>
+• Após clicar, digite apenas as informações solicitadas<br>
+• Não precisa repetir comandos após usar os botões<br>
 
-**📋 Comandos principais:**
-• `/gasto <desc> <valor> [parcelas]` - Registrar gasto
-• `/pagamento <valor> [desc]` - Registrar pagamento
-• `/saldo` - Ver saldo atual
-• `/fatura` - Ver fatura do mês
-• `/gastos` - Ver histórico de gastos
-• `/pagamentos` - Ver histórico de pagamentos
+<b>📋 Comandos principais:</b><br>
+• <code>/gasto &lt;desc&gt; &lt;valor&gt; [parcelas]</code> - Registrar gasto<br>
+• <code>/pagamento &lt;valor&gt; [desc]</code> - Registrar pagamento<br>
+• <code>/saldo</code> - Ver saldo atual<br>
+• <code>/fatura</code> - Ver fatura do mês<br>
+• <code>/gastos</code> - Ver histórico de gastos<br>
+• <code>/pagamentos</code> - Ver histórico de pagamentos<br>
 
-**💡 Como funciona:**
-• Registre seus gastos com descrição e parcelas
-• O bot calcula automaticamente as parcelas mensais
-• Registre seus pagamentos para abater da dívida
-• Acompanhe seu saldo devedor em tempo real
+<b>💡 Como funciona:</b><br>
+• Registre seus gastos com descrição e parcelas<br>
+• O bot calcula automaticamente as parcelas mensais<br>
+• Registre seus pagamentos para abater da dívida<br>
+• Acompanhe seu saldo devedor em tempo real<br>
 
-**🔒 Privacidade:**
-• Você só vê seus próprios dados
-• Administrador tem acesso a relatórios gerais
+<b>🔒 Privacidade:</b><br>
+• Você só vê seus próprios dados<br>
+• Administrador tem acesso a relatórios gerais<br>
 
-**☁️ Firebase:**
-• Dados armazenados com segurança na nuvem
-• Sincronização automática
-• Backup e recuperação garantidos
+<b>☁️ Firebase:</b><br>
+• Dados armazenados com segurança na nuvem<br>
+• Sincronização automática<br>
+• Backup e recuperação garantidos<br>
 
-**📅 Parcelas:**
-• O bot controla automaticamente as parcelas
-• Cada mês, a parcela correspondente é adicionada à fatura
+<b>📅 Parcelas:</b><br>
+• O bot controla automaticamente as parcelas<br>
+• Cada mês, a parcela correspondente é adicionada à fatura<br>
 • Gastos parcelados são distribuídos ao longo dos meses
-        """
+"""
+
         
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("🔙 Voltar", callback_data="menu_principal")
         ]])
         
-        await query.edit_message_text(ajuda_text, reply_markup=keyboard)
+        await query.edit_message_text(ajuda_text, reply_markup=keyboard, parse_mode="HTML")
 
 async def processar_mensagem_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Processa mensagens de texto baseado no estado atual do usuário"""
@@ -866,8 +879,9 @@ async def processar_mensagem_texto(update: Update, context: ContextTypes.DEFAULT
         # Estado normal - mostrar menu
         keyboard = criar_menu_principal(user_id)
         await update.message.reply_text(
-            "💳 **Menu Principal**\n\nEscolha uma opção abaixo:",
-            reply_markup=keyboard
+            "💳 <b>Menu Principal</b>\n\nEscolha uma opção abaixo:",
+            reply_markup=keyboard,
+            parse_mode="HTML"
         )
 
 async def processar_gasto_otimizado(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
@@ -881,10 +895,11 @@ async def processar_gasto_otimizado(update: Update, context: ContextTypes.DEFAUL
         
         if len(partes) < 2:
             await update.message.reply_text(
-                "❌ **Formato incorreto!**\n\n"
-                "Use: `<descrição> <valor> [parcelas]`\n\n"
-                "**Exemplos:** `Almoço 25.50` ou `Notebook 1200.00 12`",
-                reply_markup=criar_botao_cancelar()
+                "❌ <b>Formato incorreto!</b><br><br>"
+                "Use: <code>&lt;descrição&gt; &lt;valor&gt; [parcelas]</code><br><br>"
+                "<b>Exemplos:</b> <code>Almoço 25.50</code> ou <code>Notebook 1200.00 12</code>",
+                reply_markup=criar_botao_cancelar(),
+                parse_mode="HTML"
             )
             return
         
@@ -912,15 +927,17 @@ async def processar_gasto_otimizado(update: Update, context: ContextTypes.DEFAUL
         
         if valor <= 0:
             await update.message.reply_text(
-                "❌ **Valor deve ser maior que zero!**",
-                reply_markup=criar_botao_cancelar()
+                "❌ <b>Valor deve ser maior que zero!</b>",
+                reply_markup=criar_botao_cancelar(),
+                parse_mode="HTML"
             )
             return
         
         if parcelas > 60:
             await update.message.reply_text(
-                "❌ **Máximo de 60 parcelas permitido!**",
-                reply_markup=criar_botao_cancelar()
+                "❌ <b>Máximo de 60 parcelas permitido!</b>",
+                reply_markup=criar_botao_cancelar(),
+                parse_mode="HTML"
             )
             return
         
@@ -939,38 +956,41 @@ async def processar_gasto_otimizado(update: Update, context: ContextTypes.DEFAUL
         
         if parcelas == 1:
             texto_confirmacao = (
-                f"✅ **Gasto registrado com sucesso!**\n\n"
-                f"📝 **Descrição:** {descricao}\n"
-                f"💰 **Valor:** R$ {valor:.2f} (à vista)\n"
-                f"📅 **Data:** {datetime.now().strftime('%d/%m/%Y')}\n"
-                f"☁️ **Salvo no Firebase**"
+                f"✅ <b>Gasto registrado com sucesso!</b>\n\n"
+                f"📝 <b>Descrição:</b> {descricao}\n"
+                f"💰 <b>Valor:</b> R$ {valor:.2f} (à vista)\n"
+                f"📅 <b>Data:</b> {datetime.now().strftime('%d/%m/%Y')}\n"
+                f"☁️ <b>Salvo no Firebase</b>"
             )
         else:
             texto_confirmacao = (
-                f"✅ **Gasto registrado com sucesso!**\n\n"
-                f"📝 **Descrição:** {descricao}\n"
-                f"💰 **Valor total:** R$ {valor:.2f}\n"
-                f"📊 **Parcelas:** {parcelas}x R$ {valor_parcela:.2f}\n"
-                f"📅 **Data:** {datetime.now().strftime('%d/%m/%Y')}\n"
-                f"☁️ **Salvo no Firebase**"
+                f"✅ <b>Gasto registrado com sucesso!</b>\n\n"
+                f"📝 <b>Descrição:</b> {descricao}\n"
+                f"💰 <b>Valor total:</b> R$ {valor:.2f}\n"
+                f"📊 <b>Parcelas:</b> {parcelas}x R$ {valor_parcela:.2f}\n"
+                f"📅 <b>Data:</b> {datetime.now().strftime('%d/%m/%Y')}\n"
+                f"☁️ <b>Salvo no Firebase</b>"
             )
         
-        await update.message.reply_text(texto_confirmacao, reply_markup=keyboard)
+        await update.message.reply_text(texto_confirmacao, reply_markup=keyboard, parse_mode="HTML")
         
     except (InvalidOperation, ValueError):
         await update.message.reply_text(
-            "❌ **Erro nos dados informados!**\n\n"
+            "❌ <b>Erro nos dados informados!</b>\n\n"
             "Verifique se o valor está correto e as parcelas são um número inteiro.\n\n"
-            "**Formato:** `<descrição> <valor> [parcelas]`",
-            reply_markup=criar_botao_cancelar()
+            "<b>Formato:</b> <descrição> <valor> [parcelas]",
+            reply_markup=criar_botao_cancelar(),
+            parse_mode="HTML"
         )
     except Exception as e:
         logger.error(f"Erro ao processar gasto: {e}")
         await update.message.reply_text(
-            "❌ **Erro interno!**\n\n"
+            "❌ <b>Erro interno!</b>\n\n"
             "Tente novamente em alguns instantes.",
-            reply_markup=criar_botao_cancelar()
+            reply_markup=criar_botao_cancelar(),
+            parse_mode="HTML"
         )
+
 
 async def processar_pagamento_otimizado(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
     """Processa pagamento no modo otimizado"""
@@ -983,10 +1003,11 @@ async def processar_pagamento_otimizado(update: Update, context: ContextTypes.DE
         
         if len(partes) < 1:
             await update.message.reply_text(
-                "❌ **Formato incorreto!**\n\n"
-                "Use: `<valor> [descrição]`\n\n"
-                "**Exemplo:** `150.00` ou `200.50 Pagamento fatura março`",
-                reply_markup=criar_botao_cancelar()
+                "❌ <b>Formato incorreto!</b>\n\n"
+                "Use: <code>&lt;valor&gt; [descrição]</code>\n\n"
+                "<b>Exemplo:</b> <code>150.00</code> ou <code>200.50 Pagamento fatura março</code>",
+                reply_markup=criar_botao_cancelar(),
+                parse_mode="HTML"
             )
             return
         
@@ -999,7 +1020,7 @@ async def processar_pagamento_otimizado(update: Update, context: ContextTypes.DE
         
         if valor <= 0:
             await update.message.reply_text(
-                "❌ **Valor deve ser maior que zero!**",
+                "❌ <b>Valor deve ser maior que zero!</b>",
                 reply_markup=criar_botao_cancelar()
             )
             return
@@ -1034,32 +1055,35 @@ async def processar_pagamento_otimizado(update: Update, context: ContextTypes.DE
             texto_saldo = "Conta quitada!"
         
         texto_confirmacao = (
-            f"✅ **Pagamento registrado com sucesso!**\n\n"
-            f"💰 **Valor pago:** R$ {valor:.2f}\n"
-            f"📝 **Descrição:** {descricao}\n"
-            f"📅 **Data:** {datetime.now().strftime('%d/%m/%Y')}\n\n"
-            f"{emoji_saldo} **{texto_saldo}**\n"
-            f"☁️ **Salvo no Firebase**"
+            f"✅ <b>Pagamento registrado com sucesso!</b>\n\n"
+            f"💰 <b>Valor pago:</b> R$ {valor:.2f}\n"
+            f"📝 <b>Descrição:</b> {descricao}\n"
+            f"📅 <b>Data:</b> {datetime.now().strftime('%d/%m/%Y')}\n\n"
+            f"{emoji_saldo} <b>{texto_saldo}</b>\n"
+            f"☁️ <b>Salvo no Firebase</b>"
         )
         
-        await update.message.reply_text(texto_confirmacao, reply_markup=keyboard)
+        await update.message.reply_text(texto_confirmacao, reply_markup=keyboard, parse_mode="HTML")
         
     except (InvalidOperation, ValueError):
         await update.message.reply_text(
-            "❌ **Valor inválido!**\n\n"
+            "❌ <b>Valor inválido!</b>\n\n"
             "Use apenas números.\n\n"
-            "**Exemplos válidos:**\n"
-            "• `100`\n"
-            "• `150.50`",
-            reply_markup=criar_botao_cancelar()
+            "<b>Exemplos válidos:</b>\n"
+            "• <code>100</code>\n"
+            "• <code>150.50</code>",
+            reply_markup=criar_botao_cancelar(),
+            parse_mode="HTML"
         )
     except Exception as e:
         logger.error(f"Erro ao processar pagamento: {e}")
         await update.message.reply_text(
-            "❌ **Erro interno!**\n\n"
+            "❌ <b>Erro interno!</b>\n\n"
             "Tente novamente em alguns instantes.",
-            reply_markup=criar_botao_cancelar()
+            reply_markup=criar_botao_cancelar(),
+            parse_mode="HTML"
         )
+
 
 async def processar_consulta_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
     """Processa consulta de usuário (apenas admin)"""
@@ -1068,7 +1092,7 @@ async def processar_consulta_usuario(update: Update, context: ContextTypes.DEFAU
     if user_id != ADMIN_ID:
         context.user_data['estado'] = ESTADO_NORMAL
         await update.message.reply_text(
-            "❌ **Acesso negado!**",
+            "❌ <b>Acesso negado!</b>",
             reply_markup=criar_menu_principal(user_id)
         )
         return
@@ -1119,29 +1143,31 @@ async def processar_consulta_usuario(update: Update, context: ContextTypes.DEFAU
                 emoji_saldo = "⚖️"
                 status_saldo = "Quitado"
             
-            texto_consulta = f"🔍 **Consulta de Usuário - Admin**\n\n"
-            texto_consulta += f"👤 **Nome:** {nome}\n"
-            texto_consulta += f"📱 **Username:** @{username}\n"
-            texto_consulta += f"{emoji_saldo} **Saldo:** {status_saldo}\n"
-            texto_consulta += f"💳 **Fatura atual:** R$ {valor_fatura:.2f}\n"
-            texto_consulta += f"📋 **Total de gastos:** {len(gastos)}\n"
-            texto_consulta += f"💸 **Total de pagamentos:** {len(pagamentos)}\n"
-            texto_consulta += f"☁️ **Dados do Firebase**"
+            texto_consulta = f"🔍 <b>Consulta de Usuário - Admin</b>\n\n"
+            texto_consulta += f"👤 <b>Nome:</b> {nome}\n"
+            texto_consulta += f"📱 <b>Username:</b> @{username}\n"
+            texto_consulta += f"{emoji_saldo} <b>Saldo:</b> {status_saldo}\n"
+            texto_consulta += f"💳 <b>Fatura atual:</b> R$ {valor_fatura:.2f}\n"
+            texto_consulta += f"📋 <b>Total de gastos:</b> {len(gastos)}\n"
+            texto_consulta += f"💸 <b>Total de pagamentos:</b> {len(pagamentos)}\n"
+            texto_consulta += f"☁️ <b>Dados do Firebase</b>"
             
-            await update.message.reply_text(texto_consulta, reply_markup=keyboard)
+            await update.message.reply_text(texto_consulta, reply_markup=keyboard, parse_mode="HTML")
         else:
             await update.message.reply_text(
-                f"❌ **Usuário não encontrado!**\n\n"
-                f"Nenhum usuário encontrado com o termo: `{texto}`\n\n"
+                f"❌ <b>Usuário não encontrado!</b>\n\n"
+                f"Nenhum usuário encontrado com o termo: <code>{texto}</code>\n\n"
                 f"Tente buscar por nome ou username.",
-                reply_markup=keyboard
+                reply_markup=keyboard,
+                parse_mode="HTML"
             )
     except Exception as e:
         logger.error(f"Erro ao consultar usuário: {e}")
         await update.message.reply_text(
-            "❌ **Erro interno!**\n\n"
+            "❌ <b>Erro interno!</b>\n\n"
             "Tente novamente em alguns instantes.",
-            reply_markup=keyboard
+            reply_markup=keyboard,
+            parse_mode="HTML"
         )
 
 # Manter comandos tradicionais para compatibilidade
@@ -1163,13 +1189,14 @@ async def gasto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         
         await update.message.reply_text(
-            "❌ **Uso incorreto!**\n\n"
-            "**Formato:** `/gasto <descrição> <valor> [parcelas]`\n\n"
-            "**Exemplos:**\n"
-            "• `/gasto Almoço 25.50`\n"
-            "• `/gasto Notebook 1200.00 12`\n\n"
-            "💡 **Dica:** Use o menu otimizado para uma experiência melhor!",
-            reply_markup=keyboard
+            "❌ <b>Uso incorreto!</b>\n\n"
+            "<b>Formato:</b> <code>/gasto &lt;descrição&gt; &lt;valor&gt; [parcelas]</code>\n\n"
+            "<b>Exemplos:</b>\n"
+            "• <code>/gasto Almoço 25.50</code>\n"
+            "• <code>/gasto Notebook 1200.00 12</code>\n\n"
+            "💡 <b>Dica:</b> Use o menu otimizado para uma experiência melhor!",
+            reply_markup=keyboard,
+            parse_mode="HTML"
         )
         return
     
@@ -1195,13 +1222,14 @@ async def pagamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         
         await update.message.reply_text(
-            "❌ **Uso incorreto!**\n\n"
-            "**Formato:** `/pagamento <valor> [descrição]`\n\n"
-            "**Exemplos:**\n"
-            "• `/pagamento 150.00`\n"
-            "• `/pagamento 200.50 Pagamento fatura março`\n\n"
-            "💡 **Dica:** Use o menu otimizado para uma experiência melhor!",
-            reply_markup=keyboard
+            "❌ <b>Uso incorreto!</b>\n\n"
+            "<b>Formato:</b> <code>/pagamento &lt;valor&gt; [descrição]</code>\n\n"
+            "<b>Exemplos:</b>\n"
+            "• <code>/pagamento 150.00</code>\n"
+            "• <code>/pagamento 200.50 Pagamento fatura março</code>\n\n"
+            "💡 <b>Dica:</b> Use o menu otimizado para uma experiência melhor!",
+            reply_markup=keyboard,
+            parse_mode="HTML"
         )
         return
     
@@ -1241,11 +1269,12 @@ async def saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     
     await update.message.reply_text(
-        f"{emoji} **{user_name}**, seu saldo atual:\n\n"
-        f"📊 **{texto_status}**\n\n"
+        f"{emoji} <b>{user_name}</b>, seu saldo atual:\n\n"
+        f"📊 <b>{texto_status}</b>\n\n"
         f"Status: {status.title()}\n"
         f"☁️ Dados sincronizados com Firebase",
-        reply_markup=keyboard
+        reply_markup=keyboard,
+        parse_mode="HTML"
     )
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
