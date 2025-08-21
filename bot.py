@@ -34,6 +34,7 @@ ESTADO_NORMAL = "normal"
 ESTADO_AGUARDANDO_GASTO = "aguardando_gasto"
 ESTADO_AGUARDANDO_PAGAMENTO = "aguardando_pagamento"
 ESTADO_AGUARDANDO_CONSULTA_USUARIO = "aguardando_consulta_usuario"
+ESTADO_AGUARDANDO_EXTRATO_ADMIN = 91  # número alto para não colidir
 
 class FirebaseCartaoCreditoBot:
     def __init__(self):
@@ -450,6 +451,119 @@ class FirebaseCartaoCreditoBot:
         except Exception as e:
             logger.error(f"Erro ao obter relatório completo: {e}")
             return relatorio
+        
+     # ===================== EXTRATO (DATA LAYER) =====================       
+    def _iterar_parcelas_do_mes(self, gasto: dict, mes: int, ano: int):
+        """
+        Gera 0..1 itens de parcela para ESTE (mes,ano) com campos prontos para o extrato.
+        Um gasto só gera uma parcela por mês, se devida.
+        """
+        if self._gasto_tem_parcela_no_mes(gasto, mes, ano):
+            yield {
+                "tipo": "Parcela",
+                "descricao": gasto.get("descricao", "").strip() or "(sem descrição)",
+                "valor": self._float_para_decimal(gasto.get("valor_parcela", 0.0)),
+                "data": datetime.datetime(int(ano), int(mes), 1),  # data simbólica: 1º do mês
+                "meta": {
+                    "gasto_id": gasto.get("id") or gasto.get("doc_id"),
+                    "parcelas_total": gasto.get("parcelas_total"),
+                    "mes_inicio": gasto.get("mes_inicio"),
+                    "ano_inicio": gasto.get("ano_inicio"),
+                }
+            }
+    
+    def obter_extrato_usuario(self, user_id: int, mes: int, ano: int):
+        """
+        Retorna (itens, totais) onde:
+        - itens: lista de dicts {tipo, descricao, valor(Decimal), data(datetime), meta}
+        - totais: dict {"parcelas_mes": Decimal, "pagamentos_mes": Decimal, "saldo_mes": Decimal}
+        Considera:
+        - Todas as parcelas de gastos devidas em (mes, ano)
+        - Todos os pagamentos registrados com (mes, ano)
+        """
+        from decimal import Decimal
+        itens = []
+
+        # --- GASTOS (parcelas do mês) ---
+        gastos_ref = self.db.collection(COLLECTION_GASTOS)\
+            .where("user_id", "==", user_id)\
+            .where("ativo", "==", True)
+        for doc in gastos_ref.stream():
+            g = doc.to_dict() or {}
+            g["doc_id"] = doc.id
+            for item in self._iterar_parcelas_do_mes(g, mes, ano):
+                itens.append(item)
+
+        # --- PAGAMENTOS do mês ---
+        pagamentos_ref = self.db.collection(COLLECTION_PAGAMENTOS)\
+            .where("user_id", "==", user_id)\
+            .where("mes", "==", int(mes))\
+            .where("ano", "==", int(ano))
+        for doc in pagamentos_ref.stream():
+            p = doc.to_dict() or {}
+            valor = self._float_para_decimal(p.get("valor", 0.0))
+            data_pg = p.get("data_pagamento")
+            # data_pagamento pode ser timestamp; reforce para datetime
+            if hasattr(data_pg, "to_datetime"):
+                data_pg = data_pg.to_datetime()
+            elif isinstance(data_pg, (int, float)):
+                data_pg = datetime.datetime.fromtimestamp(data_pg)
+            elif not isinstance(data_pg, datetime.datetime):
+                data_pg = datetime.datetime(int(ano), int(mes), 1)
+
+            itens.append({
+                "tipo": "Pagamento",
+                "descricao": (p.get("descricao") or "Pagamento").strip(),
+                "valor": valor,
+                "data": data_pg,
+                "meta": {"pagamento_id": doc.id}
+            })
+
+        # Ordena por data (Parcela fatura vem com dia 1; pagamentos entram na data real)
+        itens.sort(key=lambda x: x["data"])
+
+        total_parcelas = sum((i["valor"] for i in itens if i["tipo"] == "Parcela"), Decimal("0.00"))
+        total_pagamentos = sum((i["valor"] for i in itens if i["tipo"] == "Pagamento"), Decimal("0.00"))
+        saldo_mes = (total_parcelas - total_pagamentos).quantize(Decimal("0.01"))
+
+        return itens, {
+            "parcelas_mes": total_parcelas.quantize(Decimal("0.01")),
+            "pagamentos_mes": total_pagamentos.quantize(Decimal("0.01")),
+            "saldo_mes": saldo_mes
+        }
+    
+    def buscar_usuario_por_nome_ou_username(self, termo: str):
+        """
+        Procura um usuário por username (com ou sem @) ou por 'name' contendo termo (case-insensitive).
+        Retorna dict do usuário ou None.
+        """
+        termo = (termo or "").strip()
+        if termo.startswith("@"):
+            termo = termo[1:]
+
+        # 1) Tenta username exato
+        q1 = self.db.collection(COLLECTION_USUARIOS).where("username", "==", termo).limit(1).stream()
+        for d in q1:
+            u = d.to_dict() or {}
+            u["user_id"] = d.id
+            return u
+
+        # 2) Tenta nome contendo termo (ingênuo; Firestore não tem contains nativo, então guardamos variantes)
+        # fallback: buscar todos e filtrar em memória (se sua base for pequena)
+        try:
+            todos = list(self.db.collection(COLLECTION_USUARIOS).stream())
+            termo_low = termo.lower()
+            for d in todos:
+                u = d.to_dict() or {}
+                nome = (u.get("name") or "").lower()
+                if termo_low in nome:
+                    u["user_id"] = d.id
+                    return u
+        except Exception:
+            pass
+
+        return None
+
 
 # Instância global do bot
 cartao_bot = FirebaseCartaoCreditoBot()
@@ -468,6 +582,9 @@ def criar_menu_principal(user_id):
         [
             InlineKeyboardButton("🧾 Fatura Atual", callback_data="menu_fatura_atual"),
             InlineKeyboardButton("💸 Meus Pagamentos", callback_data="menu_meus_pagamentos")
+        ],
+        [
+            InlineKeyboardButton("📜 Extrato do mês", callback_data="menu_extrato_mes")
         ]
     ]
     
@@ -475,7 +592,8 @@ def criar_menu_principal(user_id):
     if user_id == ADMIN_ID:
         keyboard.append([
             InlineKeyboardButton("👥 Relatório Geral", callback_data="menu_relatorio_geral"),
-            InlineKeyboardButton("🔍 Consultar Usuário", callback_data="menu_consultar_usuario")
+            InlineKeyboardButton("🔍 Consultar Usuário", callback_data="menu_consultar_usuario"),
+            InlineKeyboardButton("📜 Extrato por usuário", callback_data="menu_extrato_admin")
         ])
     
     keyboard.append([InlineKeyboardButton("❓ Ajuda", callback_data="menu_ajuda")])
@@ -813,6 +931,33 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.edit_message_text(texto_relatorio, reply_markup=keyboard, parse_mode="HTML")
     
+    elif data == "menu_extrato_mes":
+        agora = datetime.datetime.now()
+        mes, ano = agora.month, agora.year
+        user_id = update.effective_user.id
+        itens, totais = cartao_bot.obter_extrato_usuario(user_id, mes, ano)
+        texto = montar_texto_extrato(itens, totais, mes, ano)
+        await query.edit_message_text(
+            texto,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu_principal")]])
+        )
+
+    elif data == "menu_extrato_admin":
+        # somente admin
+        if str(update.effective_user.id) != str(ADMIN_ID):
+            await query.answer("Acesso restrito.", show_alert=True)
+        else:
+            context.user_data['estado'] = ESTADO_AGUARDANDO_EXTRATO_ADMIN
+            await query.edit_message_text(
+                "📜 <b>Extrato por usuário</b>\n\n"
+                "Envie: <code>&lt;username|nome&gt; [mes ano]</code>\n"
+                "Ex.: <code>@joao 8 2025</code> ou <code>maria</code>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancelar", callback_data="cancelar_operacao")]])
+            )
+
+    
     elif data == "menu_ajuda":
         ajuda_text = """
 ❓ <b>Ajuda - Bot de Cartão de Crédito</b>
@@ -875,6 +1020,8 @@ async def processar_mensagem_texto(update: Update, context: ContextTypes.DEFAULT
         await processar_pagamento_otimizado(update, context, texto)
     elif estado == ESTADO_AGUARDANDO_CONSULTA_USUARIO:
         await processar_consulta_usuario(update, context, texto)
+    elif estado == ESTADO_AGUARDANDO_EXTRATO_ADMIN:
+        await processar_extrato_admin(update, context, texto)
     else:
         # Estado normal - mostrar menu
         keyboard = criar_menu_principal(user_id)
@@ -1170,6 +1317,55 @@ async def processar_consulta_usuario(update: Update, context: ContextTypes.DEFAU
             parse_mode="HTML"
         )
 
+async def processar_extrato_admin(update, context, texto: str):
+    try:
+        partes = texto.split()
+        if not partes:
+            await update.message.reply_text(
+                "❌ Formato inválido. Envie: <code>&lt;username|nome&gt; [mes ano]</code>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancelar", callback_data="cancelar_operacao")]])
+            )
+            return
+
+        termo = partes[0]
+        mes = ano = None
+
+        if len(partes) >= 3 and partes[1].isdigit() and partes[2].isdigit():
+            mes, ano = int(partes[1]), int(partes[2])
+        else:
+            agora = datetime.datetime.now()
+            mes, ano = agora.month, agora.year
+
+        u = cartao_bot.buscar_usuario_por_nome_ou_username(termo)
+        if not u:
+            await update.message.reply_text(
+                "❌ Usuário não encontrado.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancelar", callback_data="cancelar_operacao")]])
+            )
+            return
+
+        target_id = int(u["user_id"])
+        itens, totais = cartao_bot.obter_extrato_usuario(target_id, mes, ano)
+        nome_mostrar = u.get("name") or f"@{u.get('username')}" or u["user_id"]
+
+        texto_resp = (f"👤 <b>{nome_mostrar}</b>\n" +
+                      montar_texto_extrato(itens, totais, mes, ano))
+        await update.message.reply_text(
+            texto_resp,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu_principal")]])
+        )
+    except Exception as e:
+        logger.error(f"Erro no extrato admin: {e}")
+        await update.message.reply_text(
+            "❌ Erro ao obter extrato.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu_principal")]])
+        )
+    finally:
+        context.user_data['estado'] = ESTADO_NORMAL
+
+
 # Manter comandos tradicionais para compatibilidade
 async def gasto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /gasto - Adiciona um novo gasto (modo tradicional)"""
@@ -1277,6 +1473,56 @@ async def saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
 
+async def extrato(update, context):
+    user = update.effective_user
+    args = context.args or []
+    agora = datetime.datetime.now()
+
+    if len(args) == 0:
+        mes, ano = agora.month, agora.year
+    elif len(args) == 2 and all(a.isdigit() for a in args):
+        mes, ano = int(args[0]), int(args[1])
+    else:
+        await update.message.reply_text("Use: /extrato [mes ano]\nEx.: /extrato 8 2025")
+        return
+
+    itens, totais = cartao_bot.obter_extrato_usuario(user.id, mes, ano)
+    texto = montar_texto_extrato(itens, totais, mes, ano)
+    await update.message.reply_text(texto, parse_mode="HTML")
+
+
+# ===================== EXTRATO (HELPERS DE FORMATAÇÃO) =====================
+
+def _fmt_valor_brl(d):
+    return f"R$ {d:.2f}".replace(".", ",")
+
+def montar_texto_extrato(itens, totais, mes, ano, limite_itens=30):
+    linhas = []
+    linhas.append(f"📜 <b>Extrato {int(mes):02d}/{ano}</b>\n")
+
+    if not itens:
+        linhas.append("Não há movimentações neste mês.")
+    else:
+        count = 0
+        for i in itens:
+            if count >= limite_itens:
+                linhas.append(f"\n… e mais {len(itens) - limite_itens} itens.")
+                break
+            data_str = i["data"].strftime("%d/%m")
+            if i["tipo"] == "Parcela":
+                linhas.append(f"• {data_str} — <b>Parcela</b> — {i['descricao']} — {_fmt_valor_brl(i['valor'])}")
+            else:
+                linhas.append(f"• {data_str} — <b>Pagamento</b> — {i['descricao']} — {_fmt_valor_brl(i['valor'])}")
+            count += 1
+
+    linhas.append("\n<b>Totais do mês</b>")
+    linhas.append(f"Parcelas: {_fmt_valor_brl(totais['parcelas_mes'])}")
+    linhas.append(f"Pagamentos: {_fmt_valor_brl(totais['pagamentos_mes'])}")
+    linhas.append(f"<b>Saldo do mês:</b> {_fmt_valor_brl(totais['saldo_mes'])}")
+
+    return "\n".join(linhas)
+
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manipula erros"""
     logger.error(f"Erro: {context.error}")
@@ -1307,6 +1553,8 @@ async def run_telegram_bot():
     application.add_handler(CommandHandler("gasto", gasto))
     application.add_handler(CommandHandler("pagamento", pagamento))
     application.add_handler(CommandHandler("saldo", saldo))
+    application.add_handler(CommandHandler("extrato", extrato))
+
     
     # Adicionar handler para callbacks dos botões
     application.add_handler(CallbackQueryHandler(callback_handler))
