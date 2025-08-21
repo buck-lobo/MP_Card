@@ -1502,6 +1502,28 @@ def _fmt_valor_brl(d):
     return f"R$ {d:.2f}".replace(".", ",")
 
 def montar_texto_extrato(itens, totais, mes, ano, limite_itens=30):
+    def _fmt_valor_brl(d):
+        return f"R$ {d:.2f}".replace(".", ",")
+
+    def _calc_parcela_atual(meta, mes, ano):
+        """
+        Retorna o número da parcela no mês/ano informados (1-based),
+        ou None se não der para calcular.
+        Requer: meta['mes_inicio'], meta['ano_inicio'] e (opcional) meta['parcelas_total'].
+        """
+        try:
+            mi = int(meta.get("mes_inicio"))
+            ai = int(meta.get("ano_inicio"))
+            if not (1 <= mi <= 12):
+                return None
+            # i = 0 para o mês de início, 1 para o seguinte...
+            i = (int(ano) * 12 + int(mes)) - (ai * 12 + mi)
+            if i < 0:
+                return None
+            return i + 1  # 1-based
+        except Exception:
+            return None
+
     linhas = []
     linhas.append(f"📜 <b>Extrato {int(mes):02d}/{ano}</b>\n")
 
@@ -1513,11 +1535,30 @@ def montar_texto_extrato(itens, totais, mes, ano, limite_itens=30):
             if count >= limite_itens:
                 linhas.append(f"\n… e mais {len(itens) - limite_itens} itens.")
                 break
+
             data_str = i["data"].strftime("%d/%m")
+            desc = (i.get("descricao") or "").strip() or "(sem descrição)"
+            valor = _fmt_valor_brl(i["valor"])
+
             if i["tipo"] == "Parcela":
-                linhas.append(f"• {data_str} — <b>Parcela</b> — {i['descricao']} — {_fmt_valor_brl(i['valor'])}")
-            else:
-                linhas.append(f"• {data_str} — <b>Pagamento</b> — {i['descricao']} — {_fmt_valor_brl(i['valor'])}")
+                # tenta montar “(n/total)”
+                meta = i.get("meta") or {}
+                n_atual = _calc_parcela_atual(meta, mes, ano)
+                total = meta.get("parcelas_total")
+                marcador = ""
+                if n_atual:
+                    if total:
+                        marcador = f" ({n_atual}/{int(total)})"
+                    else:
+                        marcador = f" ({n_atual})"
+
+                # linha limpa: data — descrição (n/total) — valor
+                linhas.append(f"• {data_str} — {desc}{marcador} — {valor}")
+
+            else:  # Pagamento
+                # manter destaque sutil para pagamentos
+                linhas.append(f"• {data_str} — <b>Pagamento</b> — {desc} — {valor}")
+
             count += 1
 
     linhas.append("\n<b>Totais do mês</b>")
@@ -1526,6 +1567,7 @@ def montar_texto_extrato(itens, totais, mes, ano, limite_itens=30):
     linhas.append(f"<b>Saldo do mês:</b> {_fmt_valor_brl(totais['saldo_mes'])}")
 
     return "\n".join(linhas)
+
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
