@@ -463,7 +463,7 @@ class FirebaseCartaoCreditoBot:
                 "tipo": "Parcela",
                 "descricao": gasto.get("descricao", "").strip() or "(sem descrição)",
                 "valor": self._float_para_decimal(gasto.get("valor_parcela", 0.0)),
-                "data": datetime.datetime(int(ano), int(mes), 1),  # data simbólica: 1º do mês
+                "data": datetime(int(ano), int(mes), 1),  # data simbólica: 1º do mês
                 "meta": {
                     "gasto_id": gasto.get("id") or gasto.get("doc_id"),
                     "parcelas_total": gasto.get("parcelas_total"),
@@ -472,7 +472,7 @@ class FirebaseCartaoCreditoBot:
                 }
             }
     
-    def obter_extrato_usuario(self, user_id: int, mes: int, ano: int):
+    def obter_extrato_usuario(self, user_id, mes: int, ano: int):
         """
         Retorna (itens, totais) onde:
         - itens: lista de dicts {tipo, descricao, valor(Decimal), data(datetime), meta}
@@ -481,12 +481,17 @@ class FirebaseCartaoCreditoBot:
         - Todas as parcelas de gastos devidas em (mes, ano)
         - Todos os pagamentos registrados com (mes, ano)
         """
+
+        """
+        user_id pode vir como int ou str; aqui normalizamos para str
+        """
         from decimal import Decimal
+        user_id_str = str(user_id)   # <<< normalização importante
         itens = []
 
         # --- GASTOS (parcelas do mês) ---
         gastos_ref = self.db.collection(COLLECTION_GASTOS)\
-            .where("user_id", "==", user_id)\
+            .where("user_id", "==", user_id_str)\
             .where("ativo", "==", True)
         for doc in gastos_ref.stream():
             g = doc.to_dict() or {}
@@ -496,7 +501,7 @@ class FirebaseCartaoCreditoBot:
 
         # --- PAGAMENTOS do mês ---
         pagamentos_ref = self.db.collection(COLLECTION_PAGAMENTOS)\
-            .where("user_id", "==", user_id)\
+            .where("user_id", "==", user_id_str)\
             .where("mes", "==", int(mes))\
             .where("ano", "==", int(ano))
         for doc in pagamentos_ref.stream():
@@ -507,9 +512,9 @@ class FirebaseCartaoCreditoBot:
             if hasattr(data_pg, "to_datetime"):
                 data_pg = data_pg.to_datetime()
             elif isinstance(data_pg, (int, float)):
-                data_pg = datetime.datetime.fromtimestamp(data_pg)
-            elif not isinstance(data_pg, datetime.datetime):
-                data_pg = datetime.datetime(int(ano), int(mes), 1)
+                data_pg = datetime.fromtimestamp(data_pg)
+            elif not isinstance(data_pg, datetime):
+                data_pg = datetime(int(ano), int(mes), 1)
 
             itens.append({
                 "tipo": "Pagamento",
@@ -932,7 +937,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(texto_relatorio, reply_markup=keyboard, parse_mode="HTML")
     
     elif data == "menu_extrato_mes":
-        agora = datetime.datetime.now()
+        agora = datetime.now()
         mes, ano = agora.month, agora.year
         user_id = update.effective_user.id
         itens, totais = cartao_bot.obter_extrato_usuario(user_id, mes, ano)
@@ -1334,7 +1339,7 @@ async def processar_extrato_admin(update, context, texto: str):
         if len(partes) >= 3 and partes[1].isdigit() and partes[2].isdigit():
             mes, ano = int(partes[1]), int(partes[2])
         else:
-            agora = datetime.datetime.now()
+            agora = datetime.now()
             mes, ano = agora.month, agora.year
 
         u = cartao_bot.buscar_usuario_por_nome_ou_username(termo)
@@ -1345,8 +1350,8 @@ async def processar_extrato_admin(update, context, texto: str):
             )
             return
 
-        target_id = int(u["user_id"])
-        itens, totais = cartao_bot.obter_extrato_usuario(target_id, mes, ano)
+        target_id_str = str(u["user_id"])
+        itens, totais = cartao_bot.obter_extrato_usuario(target_id_str, mes, ano)
         nome_mostrar = u.get("name") or f"@{u.get('username')}" or u["user_id"]
 
         texto_resp = (f"👤 <b>{nome_mostrar}</b>\n" +
@@ -1476,7 +1481,7 @@ async def saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def extrato(update, context):
     user = update.effective_user
     args = context.args or []
-    agora = datetime.datetime.now()
+    agora = datetime.now()
 
     if len(args) == 0:
         mes, ano = agora.month, agora.year
