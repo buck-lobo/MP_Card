@@ -81,7 +81,6 @@ ESTADO_AGUARDANDO_CONSULTA_USUARIO = "aguardando_consulta_usuario"
 ESTADO_AGUARDANDO_EXTRATO_ADMIN = 91  # número alto para não colidir
 
 application = None
-bot_task = None
 
 class FirebaseCartaoCreditoBot:
     def __init__(self):
@@ -1633,7 +1632,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def run_telegram_bot():
     """Função para configurar e iniciar o bot do Telegram"""
-    global application, bot_task
+    global application
     if not BOT_TOKEN:
         logger.error("❌ ERRO: BOT_TOKEN não configurado!")
         print("❌ ERRO: Configure o BOT_TOKEN no arquivo .env ou nas variáveis de ambiente do Render.")
@@ -1681,14 +1680,14 @@ async def run_telegram_bot():
     logger.info("📱 Interface otimizada ativa!")
     logger.info("☁️ Dados armazenados no Firebase Firestore!")
     
-    # Iniciar o polling de forma não bloqueante
-    bot_task = asyncio.create_task(
-        application.run_polling(
-            drop_pending_updates=True,
-            poll_interval=1.5,
-            allowed_updates=Update.ALL_TYPES,
-            timeout=60,
-        )
+    # ✅ padrão não-bloqueante compatível com FastAPI/loop já em execução
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(
+        drop_pending_updates=True,
+        poll_interval=1.5,
+        allowed_updates=Update.ALL_TYPES,
+        timeout=60,
     )
 
     logger.info("Bot Telegram polling iniciado.")
@@ -1697,33 +1696,18 @@ async def run_telegram_bot():
 async def start_bot():
     """Inicia o bot de forma não-bloqueante e fica 'vivo' até ser cancelado."""
     try:
-        await run_telegram_bot()
+        await run_telegram_bot()   # sobe a Application e inicia o updater.start_polling (não bloqueante)
         while True:
-            await asyncio.sleep(3600)
+            await asyncio.sleep(3600)  # mantém a task viva
     except asyncio.CancelledError:
         logger.info("Cancel recebido: parando bot...")
-
-        # Tenta parar limpo a Application
         if application is not None:
+            # 1) para o polling do updater primeiro
+            await application.updater.stop()
+            # 2) encerra a Application
             await application.stop()
             await application.shutdown()
-
-        # Aguarda a task do polling terminar (se existir)
-        if bot_task is not None:
-            try:
-                await bot_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                # fallback: se ainda estiver viva, cancela
-                if not bot_task.done():
-                    bot_task.cancel()
-                    try:
-                        await bot_task
-                    except asyncio.CancelledError:
-                        pass
-
-        # Repropaga o cancelamento para o lifespan encerrar corretamente
+        # repropaga o cancel para o FastAPI encerrar corretamente
         raise
     except Exception as e:
         logger.exception(f"Falha inesperada no start_bot: {e}")
