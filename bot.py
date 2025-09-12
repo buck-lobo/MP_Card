@@ -81,6 +81,7 @@ ESTADO_AGUARDANDO_CONSULTA_USUARIO = "aguardando_consulta_usuario"
 ESTADO_AGUARDANDO_EXTRATO_ADMIN = 91  # número alto para não colidir
 
 application = None
+bot_task = None
 
 class FirebaseCartaoCreditoBot:
     def __init__(self):
@@ -1632,7 +1633,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def run_telegram_bot():
     """Função para configurar e iniciar o bot do Telegram"""
-    global application
+    global application, bot_task
     if not BOT_TOKEN:
         logger.error("❌ ERRO: BOT_TOKEN não configurado!")
         print("❌ ERRO: Configure o BOT_TOKEN no arquivo .env ou nas variáveis de ambiente do Render.")
@@ -1681,32 +1682,50 @@ async def run_telegram_bot():
     logger.info("☁️ Dados armazenados no Firebase Firestore!")
     
     # Iniciar o polling de forma não bloqueante
-    await application.initialize()
-    await application.start()
-    # await application.updater.start_polling(drop_pending_updates=True, poll_interval=1.5, allowed_updates=Update.ALL_TYPES, timeout=60,)
-    await application.start_polling(                 # ✅ API nova (não-bloqueante)
-        drop_pending_updates=True,
-        poll_interval=1.5,
-        allowed_updates=Update.ALL_TYPES,
-        timeout=60,                                  # long-poll timeout
+    bot_task = asyncio.create_task(
+        application.run_polling(
+            drop_pending_updates=True,
+            poll_interval=1.5,
+            allowed_updates=Update.ALL_TYPES,
+            timeout=60,
+        )
     )
+
     logger.info("Bot Telegram polling iniciado.")
 
 
 async def start_bot():
     """Inicia o bot de forma não-bloqueante e fica 'vivo' até ser cancelado."""
     try:
-        await run_telegram_bot()  # sobe e começa o polling em background
+        await run_telegram_bot()
         while True:
-            await asyncio.sleep(3600)  # mantém a task viva
+            await asyncio.sleep(3600)
     except asyncio.CancelledError:
         logger.info("Cancel recebido: parando bot...")
+
+        # Tenta parar limpo a Application
         if application is not None:
             await application.stop()
             await application.shutdown()
+
+        # Aguarda a task do polling terminar (se existir)
+        if bot_task is not None:
+            try:
+                await bot_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                # fallback: se ainda estiver viva, cancela
+                if not bot_task.done():
+                    bot_task.cancel()
+                    try:
+                        await bot_task
+                    except asyncio.CancelledError:
+                        pass
+
+        # Repropaga o cancelamento para o lifespan encerrar corretamente
         raise
     except Exception as e:
-        # opcional: logar erros inesperados p/ não “sumirem”
         logger.exception(f"Falha inesperada no start_bot: {e}")
         raise
 
