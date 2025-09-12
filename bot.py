@@ -2,12 +2,14 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
-import logging
+import logging, os, re
 import time
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.request import HTTPXRequest
+from telegram.error import TimedOut, RetryAfter, NetworkError
 
 # Importações do Firebase
 import firebase_admin
@@ -22,12 +24,54 @@ from config import (
     COLLECTION_USUARIOS, COLLECTION_GASTOS, COLLECTION_PAGAMENTOS, COLLECTION_CONFIGURACOES
 )
 
-# Configurar logging
+# --- Configuração segura de logging ---
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
+# Reduz verbosidade de libs que imprimem URLs (com token)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("telegram.request").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
+
+# Padrões que podem vazar token
+# 1) URL do Telegram com prefixo 'bot'
+_token_in_url = re.compile(r"bot\d{6,}:[A-Za-z0-9_-]{30,}")
+# 2) Token “cru” (sem o 'bot' antes) — útil se alguém logar só o valor do token
+_token_raw = re.compile(r"\d{6,}:[A-Za-z0-9_-]{30,}")
+
+class RedactTokenFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+
+        # Mascara o token exato, se disponível
+        if BOT_TOKEN:
+            msg = msg.replace(BOT_TOKEN, "<TOKEN>")
+            msg = msg.replace(f"bot{BOT_TOKEN}", "bot<TOKEN>")
+
+        # Fallback: mascara qualquer coisa que pareça token
+        msg = _token_in_url.sub("bot<REDACTED>", msg)
+        msg = _token_raw.sub("<REDACTED>", msg)
+
+        record.msg = msg
+        record.args = ()
+        return True
+
+# ✅ Aplique o filtro no root logger (pega tudo, inclusive futuros handlers)
+root_logger = logging.getLogger()
+root_logger.addFilter(RedactTokenFilter())
+
+# logger da aplicação
 logger = logging.getLogger(__name__)
+
+request = HTTPXRequest(
+    connect_timeout=15.0,   # conexão com API TG
+    read_timeout=60.0,      # tempo para receber resposta
+    write_timeout=60.0,
+    pool_timeout=15.0,
+)
 
 # Estados para o modo de escuta
 ESTADO_NORMAL = "normal"
@@ -35,6 +79,8 @@ ESTADO_AGUARDANDO_GASTO = "aguardando_gasto"
 ESTADO_AGUARDANDO_PAGAMENTO = "aguardando_pagamento"
 ESTADO_AGUARDANDO_CONSULTA_USUARIO = "aguardando_consulta_usuario"
 ESTADO_AGUARDANDO_EXTRATO_ADMIN = 91  # número alto para não colidir
+
+application = None
 
 class FirebaseCartaoCreditoBot:
     def __init__(self):
@@ -1569,13 +1615,24 @@ def montar_texto_extrato(itens, totais, mes, ano, limite_itens=30):
     return "\n".join(linhas)
 
 
-
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manipula erros"""
-    logger.error(f"Erro: {context.error}")
+    err = context.error
+    if isinstance(err, RetryAfter):
+        logger.warning(f"Rate limit: esperar {err.retry_after}s")
+        return
+    if isinstance(err, (TimedOut, NetworkError)):
+        logger.warning(f"Intermitência de rede/timeout: {err}")
+        return
+
+    # Log detalhado pros demais
+    logger.error("Erro não tratado", exc_info=err)
+    if update:
+        logger.error(f"Update problemático: {update}")
+
 
 async def run_telegram_bot():
     """Função para configurar e iniciar o bot do Telegram"""
+    global application
     if not BOT_TOKEN:
         logger.error("❌ ERRO: BOT_TOKEN não configurado!")
         print("❌ ERRO: Configure o BOT_TOKEN no arquivo .env ou nas variáveis de ambiente do Render.")
@@ -1589,10 +1646,17 @@ async def run_telegram_bot():
         return
     
     # Criar aplicação
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .request(request)
+        .concurrent_updates(True)
+        .post_init(configurar_menu_comandos)
+        .build()
+        )
     
     # Configurar menu de comandos assim que iniciar
-    application.post_init = lambda app: app.create_task(configurar_menu_comandos(app))
+    # application.post_init = lambda app: app.create_task(configurar_menu_comandos(app))
     
     # Adicionar handlers
     application.add_handler(CommandHandler("start", start))
@@ -1619,12 +1683,32 @@ async def run_telegram_bot():
     # Iniciar o polling de forma não bloqueante
     await application.initialize()
     await application.start()
-    await application.updater.start_polling(drop_pending_updates=True, poll_interval=1.0, allowed_updates=Update.ALL_TYPES)
+    # await application.updater.start_polling(drop_pending_updates=True, poll_interval=1.5, allowed_updates=Update.ALL_TYPES, timeout=60,)
+    await application.start_polling(                 # ✅ API nova (não-bloqueante)
+        drop_pending_updates=True,
+        poll_interval=1.5,
+        allowed_updates=Update.ALL_TYPES,
+        timeout=60,                                  # long-poll timeout
+    )
     logger.info("Bot Telegram polling iniciado.")
 
+
 async def start_bot():
-    """Função para iniciar o bot (usada pelo keep_alive.py para rodar em background)"""
-    asyncio.create_task(run_telegram_bot())
+    """Inicia o bot de forma não-bloqueante e fica 'vivo' até ser cancelado."""
+    try:
+        await run_telegram_bot()  # sobe e começa o polling em background
+        while True:
+            await asyncio.sleep(3600)  # mantém a task viva
+    except asyncio.CancelledError:
+        logger.info("Cancel recebido: parando bot...")
+        if application is not None:
+            await application.stop()
+            await application.shutdown()
+        raise
+    except Exception as e:
+        # opcional: logar erros inesperados p/ não “sumirem”
+        logger.exception(f"Falha inesperada no start_bot: {e}")
+        raise
 
 # A função main() original do usuário, agora renomeada para run_telegram_bot()
 # e start_bot() para ser chamada pelo keep_alive.py
