@@ -1795,11 +1795,6 @@ def _inicio_periodo_aberto(hoje: datetime, fechamento_dia: int = 9):
 
 
 def montar_texto_extrato(itens, totais, mes, ano):
-    # Se vier de fatura aberta, use mes/ano da fatura (tá em totais)
-    mes_exibe = int(totais.get("mes_fatura", mes))
-    ano_exibe = int(totais.get("ano_fatura", ano))
-    linhas.append(f"📜 <b>Extrato {mes_exibe:02d}/{ano_exibe}</b>\n")
-
     def _fmt_valor_brl(d):
         return f"R$ {d:.2f}".replace(".", ",")
 
