@@ -1955,16 +1955,6 @@ async def start_bot():
         logger.exception(f"Falha inesperada no start_bot: {e}")
         raise
 
-# A função main() original do usuário, agora renomeada para run_telegram_bot()
-# e start_bot() para ser chamada pelo keep_alive.py
-
-if __name__ == '__main__':
-    # Para execução local direta (sem keep_alive.py)
-    asyncio.run(run_telegram_bot())
-
-
-
-
 class Fatura: 
     """Classe para gerenciar o ciclo de faturamento do cartão de crédito.""" 
     def __init__(self, dia_fechamento=9): 
@@ -2043,3 +2033,9 @@ class Fatura:
         return datetime(hoje.year, hoje.month - 1, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
 
 
+# A função main() original do usuário, agora renomeada para run_telegram_bot()
+# e start_bot() para ser chamada pelo keep_alive.py
+
+if __name__ == '__main__':
+    # Para execução local direta (sem keep_alive.py)
+    asyncio.run(run_telegram_bot())
