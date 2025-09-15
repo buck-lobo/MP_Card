@@ -1796,81 +1796,89 @@ def _inicio_periodo_aberto(hoje: datetime, fechamento_dia: int = 9):
 
 def montar_texto_extrato(itens, totais, mes, ano):
     def _fmt_valor_brl(d):
-        return f"R$ {d:.2f}".replace(".", ",")
+        # aceita Decimal/float/str com fallback
+        if not isinstance(d, Decimal):
+            try:
+                d = Decimal(str(d))
+            except Exception:
+                d = Decimal("0")
+        return f"R$ {d.quantize(Decimal('0.01')):.2f}".replace(".", ",")
 
-    def _calc_parcela_atual(meta, mes, ano):
+    def _calc_parcela_atual(meta, m, a):
         """
         Retorna o número da parcela no mês/ano informados (1-based),
         ou None se não der para calcular.
-        Requer: meta['mes_inicio'], meta['ano_inicio'] e (opcional) meta['parcelas_total'].
+        Espera meta['mes_inicio'], meta['ano_inicio'].
         """
         try:
             mi = int(meta.get("mes_inicio"))
             ai = int(meta.get("ano_inicio"))
             if not (1 <= mi <= 12):
                 return None
-            # i = 0 para o mês de início, 1 para o seguinte...
-            i = (int(ano) * 12 + int(mes)) - (ai * 12 + mi)
-            if i < 0:
-                return None
-            return i + 1  # 1-based
+            i = (int(a) * 12 + int(m)) - (ai * 12 + mi)
+            return i + 1 if i >= 0 else None
         except Exception:
             return None
 
+    # Se vieram mes/ano de fatura dentro de 'totais' (ex.: fatura aberta), usa-os
+    mes_exibe = int(totais.get("mes_fatura", mes) or mes or 0)
+    ano_exibe = int(totais.get("ano_fatura", ano) or ano or 0)
+
     linhas = []
-    linhas.append(f"📜 <b>Extrato {int(mes):02d}/{ano}</b>\n")
+    if mes_exibe and ano_exibe:
+        linhas.append(f"📜 <b>Extrato {mes_exibe:02d}/{ano_exibe}</b>\n")
+    else:
+        linhas.append("📜 <b>Extrato</b>\n")
 
     if not itens:
         linhas.append("Não há movimentações neste mês.")
     else:
-        count = 0
         for i in itens:
-            data_str = i["data"].strftime("%d/%m")
+            # data segura
+            dt = i.get("data")
+            if hasattr(dt, "to_datetime"):
+                dt = dt.to_datetime()
+            if not isinstance(dt, datetime):
+                # fallback: usa mês/ano de exibição ou hoje
+                base = datetime.now()
+                if mes_exibe and ano_exibe:
+                    base = datetime(ano_exibe, mes_exibe, 1)
+                dt = base
+            data_str = dt.strftime("%d/%m")
+
             desc = (i.get("descricao") or "").strip() or "(sem descrição)"
-            valor = _fmt_valor_brl(i["valor"])
+            valor = _fmt_valor_brl(i.get("valor", 0))
 
-            # if i["tipo"] == "Parcela":
-            #     # tenta montar “(n/total)”
-            #     meta = i.get("meta") or {}
-            #     n_atual = _calc_parcela_atual(meta, mes, ano)
-            #     total = meta.get("parcelas_total")
-            #     marcador = ""
-            #     if n_atual:
-            #         if total:
-            #             marcador = f" ({n_atual}/{int(total)})"
-            #         else:
-            #             marcador = f" ({n_atual})"
+            tipo = i.get("tipo")
 
-            #     # linha limpa: data — descrição (n/total) — valor
-            #     linhas.append(f"• {data_str} — {desc}{marcador} — {valor}")
-            if i["tipo"] == "Gasto":
+            if tipo == "Parcela":
                 meta = i.get("meta") or {}
-                # marcador só se houver info de parcelas (mantém n/total quando existir)
-                n_atual = _calc_parcela_atual(meta, mes, ano) if i["tipo"] == "Parcela" else None
+                n_atual = _calc_parcela_atual(meta, mes_exibe or mes, ano_exibe or ano)
                 total = meta.get("parcelas_total")
                 marcador = ""
                 if n_atual:
                     marcador = f" ({n_atual}/{int(total)})" if total else f" ({n_atual})"
                 linhas.append(f"• {data_str} — {desc}{marcador} — {valor}")
-            elif i["tipo"] == "Parcela":
+
+            elif tipo == "Gasto":
+                # gasto à vista/1ª parcela (mostra data real da compra)
                 meta = i.get("meta") or {}
-                n_atual = _calc_parcela_atual(meta, mes_exibe, ano_exibe)
+                n_atual = None
                 total = meta.get("parcelas_total")
+                # se por algum motivo vier com meta de parcelas, calcula n/N também
+                if meta.get("mes_inicio") and meta.get("ano_inicio"):
+                    n_atual = _calc_parcela_atual(meta, mes_exibe or mes, ano_exibe or ano)
                 marcador = f" ({n_atual}/{int(total)})" if (n_atual and total) else (f" ({n_atual})" if n_atual else "")
-                data_str = i["data"].strftime("%d/%m")
-                valor = _fmt_valor_brl(i["valor"])
-                desc = i.get("descricao") or "(sem descrição)"
                 linhas.append(f"• {data_str} — {desc}{marcador} — {valor}")
+
             else:  # Pagamento
-                # manter destaque sutil para pagamentos
                 linhas.append(f"• {data_str} — <b>Pagamento</b> — {desc} — {valor}")
 
-            count += 1
-
+    # Totais (com defaults para evitar KeyError)
     linhas.append("\n<b>Totais do mês</b>")
-    linhas.append(f"Parcelas: {_fmt_valor_brl(totais['parcelas_mes'])}")
-    linhas.append(f"Pagamentos: {_fmt_valor_brl(totais['pagamentos_mes'])}")
-    linhas.append(f"<b>Saldo do mês:</b> {_fmt_valor_brl(totais['saldo_mes'])}")
+    linhas.append(f"Parcelas: {_fmt_valor_brl(totais.get('parcelas_mes', 0))}")
+    linhas.append(f"Pagamentos: {_fmt_valor_brl(totais.get('pagamentos_mes', 0))}")
+    linhas.append(f"<b>Saldo do mês:</b> {_fmt_valor_brl(totais.get('saldo_mes', 0))}")
 
     return "\n".join(linhas)
 
