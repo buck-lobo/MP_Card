@@ -614,6 +614,82 @@ class FirebaseCartaoCreditoBot:
             pass
 
         return None
+    
+    def obter_extrato_consumo_usuario(self, user_id, mes:int, ano:int, fechamento_dia:int=9):
+        """
+        Extrato baseado no PERÍODO DE CONSUMO (data_compra entre 10/prev e 09/mes).
+        Também inclui pagamentos cuja data_pagamento cai no mesmo período.
+        Retorna (itens, totais) no mesmo formato do extrato atual.
+        """
+        from decimal import Decimal
+        user_id_str = str(user_id)
+        inicio, fim = _janela_ciclo(mes, ano, fechamento_dia)
+
+        itens = []
+
+        # --- GASTOS no período (pela data_compra) ---
+        # Firestore range: where >= inicio AND <= fim (precisa index se não existir)
+        gastos_ref = self.db.collection(COLLECTION_GASTOS)\
+            .where("user_id", "==", user_id_str)\
+            .where("ativo", "==", True)\
+            .where("data_compra", ">=", inicio)\
+            .where("data_compra", "<=", fim)
+
+        for doc in gastos_ref.stream():
+            g = doc.to_dict() or {}
+            valor = self._float_para_decimal(g.get("valor_total", 0.0))
+            data_compra = g.get("data_compra")
+            if hasattr(data_compra, "to_datetime"):
+                data_compra = data_compra.to_datetime()
+            elif not isinstance(data_compra, datetime):
+                data_compra = inicio  # fallback seguro
+
+            itens.append({
+                "tipo": "Gasto",
+                "descricao": (g.get("descricao") or "").strip() or "(sem descrição)",
+                "valor": valor,
+                "data": data_compra,
+                "meta": {
+                    "gasto_id": g.get("id") or doc.id,
+                    "parcelas_total": g.get("parcelas_total"),
+                }
+            })
+
+        # --- PAGAMENTOS no período (pela data_pagamento) ---
+        pagamentos_ref = self.db.collection(COLLECTION_PAGAMENTOS)\
+            .where("user_id", "==", user_id_str)\
+            .where("data_pagamento", ">=", inicio)\
+            .where("data_pagamento", "<=", fim)
+
+        for doc in pagamentos_ref.stream():
+            p = doc.to_dict() or {}
+            valor = self._float_para_decimal(p.get("valor", 0.0))
+            data_pg = p.get("data_pagamento")
+            if hasattr(data_pg, "to_datetime"):
+                data_pg = data_pg.to_datetime()
+            elif not isinstance(data_pg, datetime):
+                data_pg = inicio
+
+            itens.append({
+                "tipo": "Pagamento",
+                "descricao": (p.get("descricao") or "Pagamento").strip(),
+                "valor": valor,
+                "data": data_pg,
+                "meta": {"pagamento_id": doc.id}
+            })
+
+        # ordenar por data real do evento
+        itens.sort(key=lambda x: x["data"])
+
+        total_gastos = sum((i["valor"] for i in itens if i["tipo"] == "Gasto"), Decimal("0.00"))
+        total_pag = sum((i["valor"] for i in itens if i["tipo"] == "Pagamento"), Decimal("0.00"))
+        saldo = (total_gastos - total_pag).quantize(Decimal("0.01"))
+
+        return itens, {
+            "parcelas_mes": total_gastos.quantize(Decimal("0.01")),      # nome antigo reaproveitado
+            "pagamentos_mes": total_pag.quantize(Decimal("0.01")),
+            "saldo_mes": saldo
+        }
 
 
 # Instância global do bot
@@ -1665,85 +1741,6 @@ def montar_texto_extrato(itens, totais, mes, ano):
     linhas.append(f"<b>Saldo do mês:</b> {_fmt_valor_brl(totais['saldo_mes'])}")
 
     return "\n".join(linhas)
-
-
-def obter_extrato_consumo_usuario(self, user_id, mes:int, ano:int, fechamento_dia:int=9):
-    """
-    Extrato baseado no PERÍODO DE CONSUMO (data_compra entre 10/prev e 09/mes).
-    Também inclui pagamentos cuja data_pagamento cai no mesmo período.
-    Retorna (itens, totais) no mesmo formato do extrato atual.
-    """
-    from decimal import Decimal
-    user_id_str = str(user_id)
-    inicio, fim = _janela_ciclo(mes, ano, fechamento_dia)
-
-    itens = []
-
-    # --- GASTOS no período (pela data_compra) ---
-    # Firestore range: where >= inicio AND <= fim (precisa index se não existir)
-    gastos_ref = self.db.collection(COLLECTION_GASTOS)\
-        .where("user_id", "==", user_id_str)\
-        .where("ativo", "==", True)\
-        .where("data_compra", ">=", inicio)\
-        .where("data_compra", "<=", fim)
-
-    for doc in gastos_ref.stream():
-        g = doc.to_dict() or {}
-        valor = self._float_para_decimal(g.get("valor_total", 0.0))
-        data_compra = g.get("data_compra")
-        if hasattr(data_compra, "to_datetime"):
-            data_compra = data_compra.to_datetime()
-        elif not isinstance(data_compra, datetime):
-            data_compra = inicio  # fallback seguro
-
-        itens.append({
-            "tipo": "Gasto",
-            "descricao": (g.get("descricao") or "").strip() or "(sem descrição)",
-            "valor": valor,
-            "data": data_compra,
-            "meta": {
-                "gasto_id": g.get("id") or doc.id,
-                "parcelas_total": g.get("parcelas_total"),
-            }
-        })
-
-    # --- PAGAMENTOS no período (pela data_pagamento) ---
-    pagamentos_ref = self.db.collection(COLLECTION_PAGAMENTOS)\
-        .where("user_id", "==", user_id_str)\
-        .where("data_pagamento", ">=", inicio)\
-        .where("data_pagamento", "<=", fim)
-
-    for doc in pagamentos_ref.stream():
-        p = doc.to_dict() or {}
-        valor = self._float_para_decimal(p.get("valor", 0.0))
-        data_pg = p.get("data_pagamento")
-        if hasattr(data_pg, "to_datetime"):
-            data_pg = data_pg.to_datetime()
-        elif not isinstance(data_pg, datetime):
-            data_pg = inicio
-
-        itens.append({
-            "tipo": "Pagamento",
-            "descricao": (p.get("descricao") or "Pagamento").strip(),
-            "valor": valor,
-            "data": data_pg,
-            "meta": {"pagamento_id": doc.id}
-        })
-
-    # ordenar por data real do evento
-    itens.sort(key=lambda x: x["data"])
-
-    total_gastos = sum((i["valor"] for i in itens if i["tipo"] == "Gasto"), Decimal("0.00"))
-    total_pag = sum((i["valor"] for i in itens if i["tipo"] == "Pagamento"), Decimal("0.00"))
-    saldo = (total_gastos - total_pag).quantize(Decimal("0.01"))
-
-    return itens, {
-        "parcelas_mes": total_gastos.quantize(Decimal("0.01")),      # nome antigo reaproveitado
-        "pagamentos_mes": total_pag.quantize(Decimal("0.01")),
-        "saldo_mes": saldo
-    }
-
-
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     err = context.error
