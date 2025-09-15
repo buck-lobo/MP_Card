@@ -83,9 +83,11 @@ ESTADO_AGUARDANDO_EXTRATO_ADMIN = 91  # número alto para não colidir
 application = None
 
 class FirebaseCartaoCreditoBot:
+    """Classe principal para gerenciar a lógica de negócios do bot de cartão de crédito."""
     def __init__(self):
         self.db = self._inicializar_firebase()
         self._inicializar_configuracoes()
+        self.fatura_manager = Fatura()
     
     def _inicializar_firebase(self):
         """Inicializa a conexão com o Firebase"""
@@ -623,7 +625,8 @@ class FirebaseCartaoCreditoBot:
         """
         user_id_str = str(user_id)
         from decimal import Decimal
-        inicio, fim = _janela_ciclo(mes, ano, fechamento_dia)
+        inicio, fim = self.fatura_manager.get_periodo_fatura_fechada(mes, ano, fechamento_dia)
+
 
         itens = []
 
@@ -721,7 +724,8 @@ class FirebaseCartaoCreditoBot:
             hoje = datetime.now()
 
         # Referência da próxima fatura (onde as parcelas entrarão)
-        mes_fat, ano_fat = _proxima_fatura_ref(hoje, fechamento_dia)
+        mes_fat, ano_fat = self.fatura_manager.get_proxima_fatura_ref(hoje, fechamento_dia)
+        
 
         itens = []
 
@@ -765,7 +769,8 @@ class FirebaseCartaoCreditoBot:
                 })
 
         # --- PAGAMENTOS no PERÍODO ABERTO ---
-        inicio_aberto = _inicio_periodo_aberto(hoje, fechamento_dia)
+        inicio_aberto = self.fatura_manager.get_inicio_periodo_aberto(hoje, fechamento_dia)
+
         pagamentos_ref = self.db.collection(COLLECTION_PAGAMENTOS)\
             .where("user_id", "==", user_id_str)\
             .where("data_pagamento", ">=", inicio_aberto)\
@@ -1050,7 +1055,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_fatura_atual":
         # Mostra a fatura ABERTA do próprio usuário
         itens, totais = cartao_bot.obter_extrato_fatura_aberta(user_id)
-        texto = montar_texto_extrato(itens, totais, mes=0, ano=0)
+        texto = montar_texto_extrato(itens, totais, mes=0, ano=0, fatura_manager=cartao_bot.fatura_manager)
+
 
         await reply_long(
             query,
@@ -1165,7 +1171,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         itens, totais = cartao_bot.obter_extrato_fatura_aberta(user_id)
         # passe mes/ano “qualquer”, o formatter usará mes_fatura/ano_fatura vindos de 'totais'
-        texto = montar_texto_extrato(itens, totais, mes=0, ano=0)
+        texto = montar_texto_extrato(itens, totais, mes=0, ano=0, fatura_manager=cartao_bot.fatura_manager)
+
         await reply_long(
             query,
             texto,
@@ -1589,11 +1596,11 @@ async def processar_extrato_admin(update, context, texto: str):
         if len(partes) == 1:
             itens, totais = cartao_bot.obter_extrato_fatura_aberta(target_id_str)
             texto_resp = (f"👤 <b>{u.get('name') or '@'+(u.get('username') or target_id_str)}</b>\n" +
-                        montar_texto_extrato(itens, totais, mes=0, ano=0))
+                        montar_texto_extrato(itens, totais, mes=0, ano=0, fatura_manager=cartao_bot.fatura_manager))
         else:
             itens, totais = cartao_bot.obter_extrato_consumo_usuario(target_id_str, mes, ano)
-            texto_resp = (f"👤 <b>{u.get('name') or '@'+(u.get('username') or target_id_str)}</b>\n" +
-                        montar_texto_extrato(itens, totais, mes, ano))
+            texto_resp = (f"👤 <b>{u.get('name') or '@' + (u.get('username') or target_id_str)}</b>\n" +
+                        montar_texto_extrato(itens, totais, mes, ano, fatura_manager=cartao_bot.fatura_manager))
 
         await reply_long(
             update,
@@ -1733,8 +1740,8 @@ async def extrato(update, context):
         return
 
     itens, totais = cartao_bot.obter_extrato_consumo_usuario(user.id, mes, ano)
-    texto = montar_texto_extrato(itens, totais, mes, ano)
-    await reply_long(texto, parse_mode="HTML")
+    texto = montar_texto_extrato(itens, totais, mes, ano, fatura_manager=cartao_bot.fatura_manager)
+    await reply_long(update, texto, parse_mode="HTML")
 
 
 # ===================== EXTRATO (HELPERS DE FORMATAÇÃO) =====================
@@ -1772,50 +1779,7 @@ async def reply_long(update_or_query, texto, reply_markup=None, parse_mode="HTML
             await chat.send_message(p, parse_mode=parse_mode, reply_markup=reply_markup if idx == 0 else None)
 
 
-def _janela_ciclo(mes:int, ano:int, fechamento_dia:int=9):
-    """
-    Para um (mes, ano) de FATURA, retorna (inicio, fim) do período de consumo.
-    Ex.: mes=8, ano=2025 => [2025-07-10 00:00:00, 2025-08-09 23:59:59]
-    """
-    # o ciclo termina sempre no 'fechamento_dia' do MES informado
-    fim = datetime(ano, mes, fechamento_dia, 23, 59, 59, 999999)
-    # início é dia seguinte ao fechamento do mês anterior
-    if mes == 1:
-        inicio = datetime(ano - 1, 12, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
-    else:
-        inicio = datetime(ano, mes - 1, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
-    # como queremos começar no dia 10, movemos 1s após as 23:59:59 do dia 09
-    # (resultado: 00:00:00 do dia 10)
-    return inicio, fim
-
-def _proxima_fatura_ref(hoje: datetime, fechamento_dia: int = 9):
-    """
-    Retorna (mes_fatura, ano_fatura) da fatura ABERTA atual.
-    Regras: se hoje.day > fechamento, a próxima fatura é (mês+1); caso contrário, é o mês atual.
-    """
-    mes, ano = hoje.month, hoje.year
-    if hoje.day > fechamento_dia:
-        # fatura que fechará no próximo mês
-        if mes == 12:
-            return 1, ano + 1
-        return mes + 1, ano
-    # ainda estamos antes/na data de fechamento -> a próxima fatura é do próprio mês
-    return mes, ano
-
-def _inicio_periodo_aberto(hoje: datetime, fechamento_dia: int = 9):
-    """
-    Retorna o datetime do início do período aberto (00:00 do dia 10) após o último fechamento.
-    """
-    if hoje.day > fechamento_dia:
-        # abertura foi dia 10 deste mês
-        return datetime(hoje.year, hoje.month, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
-    # abertura foi dia 10 do mês anterior
-    if hoje.month == 1:
-        return datetime(hoje.year - 1, 12, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
-    return datetime(hoje.year, hoje.month - 1, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
-
-
-def montar_texto_extrato(itens, totais, mes, ano):
+def montar_texto_extrato(itens, totais, mes, ano, fatura_manager: Fatura):
     def _fmt_valor_brl(d):
         if not isinstance(d, Decimal):
             try:
@@ -1824,12 +1788,14 @@ def montar_texto_extrato(itens, totais, mes, ano):
                 d = Decimal("0")
         return f"R$ {d.quantize(Decimal('0.01')):.2f}".replace(".", ",")
 
-    def _calc_parcela_atual(meta, m, a):
+    def _calc_parcela_atual(meta, m, a, fatura_manager: Fatura):
         try:
             mi = int(meta.get("mes_inicio"))
             ai = int(meta.get("ano_inicio"))
             if not (1 <= mi <= 12):
                 return None
+            # Calcula a diferença em meses entre a data da fatura e a data de início do gasto
+            # A fatura é 1-based, então (mes_fatura, ano_fatura) - (mes_inicio, ano_inicio) + 1
             i = (int(a) * 12 + int(m)) - (ai * 12 + mi)
             return i + 1 if i >= 0 else None
         except Exception:
@@ -1863,7 +1829,7 @@ def montar_texto_extrato(itens, totais, mes, ano):
 
             if tipo == "Parcela":
                 meta = i.get("meta") or {}
-                n_atual = _calc_parcela_atual(meta, mes_exibe or mes, ano_exibe or ano)
+                n_atual = _calc_parcela_atual(meta, mes_exibe or mes, ano_exibe or ano, fatura_manager)
                 total = meta.get("parcelas_total")
                 marcador = ""
                 if n_atual:
@@ -1876,7 +1842,7 @@ def montar_texto_extrato(itens, totais, mes, ano):
                 n_atual = None
                 total = meta.get("parcelas_total")
                 if meta.get("mes_inicio") and meta.get("ano_inicio"):
-                    n_atual = _calc_parcela_atual(meta, mes_exibe or mes, ano_exibe or ano)
+                    n_atual = _calc_parcela_atual(meta, mes_exibe or mes, ano_exibe or ano, fatura_manager)
                 marcador = f" ({n_atual}/{int(total)})" if (n_atual and total) else (f" ({n_atual})" if n_atual else "")
                 linhas.append(f"• {data_str} — {desc}{marcador} — {valor}")
 
@@ -1995,4 +1961,85 @@ async def start_bot():
 if __name__ == '__main__':
     # Para execução local direta (sem keep_alive.py)
     asyncio.run(run_telegram_bot())
+
+
+
+
+class Fatura: 
+    """Classe para gerenciar o ciclo de faturamento do cartão de crédito.""" 
+    def __init__(self, dia_fechamento=9): 
+        self.dia_fechamento = dia_fechamento 
+ 
+    def get_periodo_fatura_atual(self, data_base=None): 
+        """Retorna o período da fatura atual (aberta).""" 
+        if data_base is None: 
+            data_base = datetime.now() 
+ 
+        if data_base.day > self.dia_fechamento: 
+            # A fatura atual começou no dia `dia_fechamento` + 1 deste mês 
+            inicio_fatura = datetime(data_base.year, data_base.month, self.dia_fechamento + 1) 
+            # E fechará no próximo mês 
+            if data_base.month == 12: 
+                fim_fatura = datetime(data_base.year + 1, 1, self.dia_fechamento) 
+            else: 
+                fim_fatura = datetime(data_base.year, data_base.month + 1, self.dia_fechamento) 
+        else: 
+            # A fatura atual começou no mês anterior 
+            if data_base.month == 1: 
+                inicio_fatura = datetime(data_base.year - 1, 12, self.dia_fechamento + 1) 
+            else: 
+                inicio_fatura = datetime(data_base.year, data_base.month - 1, self.dia_fechamento + 1) 
+            # E fechará neste mês 
+            fim_fatura = datetime(data_base.year, data_base.month, self.dia_fechamento) 
+ 
+        return inicio_fatura, fim_fatura
+
+    def get_periodo_fatura_fechada(self, mes: int, ano: int, fechamento_dia: int = 9):
+        """
+        Para um (mes, ano) de FATURA, retorna (inicio, fim) do período de consumo.
+        Ex.: mes=8, ano=2025 => [2025-07-10 00:00:00, 2025-08-09 23:59:59]
+        """
+        # o ciclo termina sempre no 'fechamento_dia' do MES informado
+        fim = datetime(ano, mes, fechamento_dia, 23, 59, 59, 999999)
+        # início é dia seguinte ao fechamento do mês anterior
+        if mes == 1:
+            inicio = datetime(ano - 1, 12, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
+        else:
+            inicio = datetime(ano, mes - 1, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
+        # como queremos começar no dia 10, movemos 1s após as 23:59:59 do dia 09
+        # (resultado: 00:00:00 do dia 10)
+        return inicio, fim
+
+
+
+
+    def get_proxima_fatura_ref(self, hoje: datetime, fechamento_dia: int = 9):
+        """
+        Retorna (mes_fatura, ano_fatura) da fatura ABERTA atual.
+        Regras: se hoje.day > fechamento, a próxima fatura é (mês+1); caso contrário, é o mês atual.
+        """
+        mes, ano = hoje.month, hoje.year
+        if hoje.day > fechamento_dia:
+            # fatura que fechará no próximo mês
+            if mes == 12:
+                return 1, ano + 1
+            return mes + 1, ano
+        # ainda estamos antes/na data de fechamento -> a próxima fatura é do próprio mês
+        return mes, ano
+
+
+
+
+    def get_inicio_periodo_aberto(self, hoje: datetime, fechamento_dia: int = 9):
+        """
+        Retorna o datetime do início do período aberto (00:00 do dia 10) após o último fechamento.
+        """
+        if hoje.day > fechamento_dia:
+            # abertura foi dia 10 deste mês
+            return datetime(hoje.year, hoje.month, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
+        # abertura foi dia 10 do mês anterior
+        if hoje.month == 1:
+            return datetime(hoje.year - 1, 12, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
+        return datetime(hoje.year, hoje.month - 1, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
+
 
