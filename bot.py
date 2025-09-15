@@ -4,7 +4,7 @@
 import asyncio
 import logging, os, re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
@@ -986,9 +986,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         agora = datetime.now()
         mes, ano = agora.month, agora.year
         user_id = update.effective_user.id
-        itens, totais = cartao_bot.obter_extrato_usuario(user_id, mes, ano)
+        itens, totais = cartao_bot.obter_extrato_consumo_usuario(user_id, mes, ano)
         texto = montar_texto_extrato(itens, totais, mes, ano)
-        await query.edit_message_text(
+        await reply_long(
+            query,
             texto,
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu_principal")]])
@@ -1397,16 +1398,15 @@ async def processar_extrato_admin(update, context, texto: str):
             return
 
         target_id_str = str(u["user_id"])
-        itens, totais = cartao_bot.obter_extrato_usuario(target_id_str, mes, ano)
+        itens, totais = cartao_bot.obter_extrato_consumo_usuario(target_id_str, mes, ano)
         nome_mostrar = u.get("name") or f"@{u.get('username')}" or u["user_id"]
 
         texto_resp = (f"👤 <b>{nome_mostrar}</b>\n" +
                       montar_texto_extrato(itens, totais, mes, ano))
-        await update.message.reply_text(
-            texto_resp,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu_principal")]])
-        )
+        await reply_long(
+            update, 
+            texto_resp, 
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu_principal")]]))
     except Exception as e:
         logger.error(f"Erro no extrato admin: {e}")
         await update.message.reply_text(
@@ -1537,17 +1537,63 @@ async def extrato(update, context):
         await update.message.reply_text("Use: /extrato [mes ano]\nEx.: /extrato 8 2025")
         return
 
-    itens, totais = cartao_bot.obter_extrato_usuario(user.id, mes, ano)
+    itens, totais = cartao_bot.obter_extrato_consumo_usuario(user.id, mes, ano)
     texto = montar_texto_extrato(itens, totais, mes, ano)
-    await update.message.reply_text(texto, parse_mode="HTML")
+    await reply_long(texto, parse_mode="HTML")
 
 
 # ===================== EXTRATO (HELPERS DE FORMATAÇÃO) =====================
 
-def _fmt_valor_brl(d):
-    return f"R$ {d:.2f}".replace(".", ",")
+MAX_TG = 3900  # margem de segurança (limite real ~4096)
 
-def montar_texto_extrato(itens, totais, mes, ano, limite_itens=30):
+async def reply_long(update_or_query, texto, reply_markup=None, parse_mode="HTML"):
+    """
+    Envia 'texto' em N mensagens se necessário. 
+    Se for callback_query, usa 'edit_message_text' no primeiro envio e 'message.reply_text' nos demais.
+    """
+    partes = []
+    atual = []
+    tamanho = 0
+    for linha in texto.split("\n"):
+        add = (linha + "\n")
+        if tamanho + len(add) > MAX_TG:
+            partes.append("".join(atual))
+            atual, tamanho = [add], len(add)
+        else:
+            atual.append(add); tamanho += len(add)
+    if atual:
+        partes.append("".join(atual))
+
+    # enviar
+    if hasattr(update_or_query, "edit_message_text"):  # veio de callback
+        await update_or_query.edit_message_text(partes[0], parse_mode=parse_mode, reply_markup=reply_markup)
+        chat = update_or_query.message.chat
+        for p in partes[1:]:
+            await chat.send_message(p, parse_mode=parse_mode)
+    else:  # mensagem normal (/extrato)
+        chat = update_or_query.effective_chat
+        # primeiro pedaço pode levar o teclado, os demais sem teclado
+        for idx, p in enumerate(partes):
+            await chat.send_message(p, parse_mode=parse_mode, reply_markup=reply_markup if idx == 0 else None)
+
+
+def _janela_ciclo(mes:int, ano:int, fechamento_dia:int=9):
+    """
+    Para um (mes, ano) de FATURA, retorna (inicio, fim) do período de consumo.
+    Ex.: mes=8, ano=2025 => [2025-07-10 00:00:00, 2025-08-09 23:59:59]
+    """
+    # o ciclo termina sempre no 'fechamento_dia' do MES informado
+    fim = datetime(ano, mes, fechamento_dia, 23, 59, 59, 999999)
+    # início é dia seguinte ao fechamento do mês anterior
+    if mes == 1:
+        inicio = datetime(ano - 1, 12, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
+    else:
+        inicio = datetime(ano, mes - 1, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
+    # como queremos começar no dia 10, movemos 1s após as 23:59:59 do dia 09
+    # (resultado: 00:00:00 do dia 10)
+    return inicio, fim
+
+def montar_texto_extrato(itens, totais, mes, ano):
     def _fmt_valor_brl(d):
         return f"R$ {d:.2f}".replace(".", ",")
 
@@ -1578,28 +1624,34 @@ def montar_texto_extrato(itens, totais, mes, ano, limite_itens=30):
     else:
         count = 0
         for i in itens:
-            if count >= limite_itens:
-                linhas.append(f"\n… e mais {len(itens) - limite_itens} itens.")
-                break
-
             data_str = i["data"].strftime("%d/%m")
             desc = (i.get("descricao") or "").strip() or "(sem descrição)"
             valor = _fmt_valor_brl(i["valor"])
 
-            if i["tipo"] == "Parcela":
-                # tenta montar “(n/total)”
+            # if i["tipo"] == "Parcela":
+            #     # tenta montar “(n/total)”
+            #     meta = i.get("meta") or {}
+            #     n_atual = _calc_parcela_atual(meta, mes, ano)
+            #     total = meta.get("parcelas_total")
+            #     marcador = ""
+            #     if n_atual:
+            #         if total:
+            #             marcador = f" ({n_atual}/{int(total)})"
+            #         else:
+            #             marcador = f" ({n_atual})"
+
+            #     # linha limpa: data — descrição (n/total) — valor
+            #     linhas.append(f"• {data_str} — {desc}{marcador} — {valor}")
+            if i["tipo"] in ("Parcela", "Gasto"):
                 meta = i.get("meta") or {}
-                n_atual = _calc_parcela_atual(meta, mes, ano)
+                # marcador só se houver info de parcelas (mantém n/total quando existir)
+                n_atual = _calc_parcela_atual(meta, mes, ano) if i["tipo"] == "Parcela" else None
                 total = meta.get("parcelas_total")
                 marcador = ""
                 if n_atual:
-                    if total:
-                        marcador = f" ({n_atual}/{int(total)})"
-                    else:
-                        marcador = f" ({n_atual})"
-
-                # linha limpa: data — descrição (n/total) — valor
+                    marcador = f" ({n_atual}/{int(total)})" if total else f" ({n_atual})"
                 linhas.append(f"• {data_str} — {desc}{marcador} — {valor}")
+
 
             else:  # Pagamento
                 # manter destaque sutil para pagamentos
@@ -1613,6 +1665,84 @@ def montar_texto_extrato(itens, totais, mes, ano, limite_itens=30):
     linhas.append(f"<b>Saldo do mês:</b> {_fmt_valor_brl(totais['saldo_mes'])}")
 
     return "\n".join(linhas)
+
+
+def obter_extrato_consumo_usuario(self, user_id, mes:int, ano:int, fechamento_dia:int=9):
+    """
+    Extrato baseado no PERÍODO DE CONSUMO (data_compra entre 10/prev e 09/mes).
+    Também inclui pagamentos cuja data_pagamento cai no mesmo período.
+    Retorna (itens, totais) no mesmo formato do extrato atual.
+    """
+    from decimal import Decimal
+    user_id_str = str(user_id)
+    inicio, fim = _janela_ciclo(mes, ano, fechamento_dia)
+
+    itens = []
+
+    # --- GASTOS no período (pela data_compra) ---
+    # Firestore range: where >= inicio AND <= fim (precisa index se não existir)
+    gastos_ref = self.db.collection(COLLECTION_GASTOS)\
+        .where("user_id", "==", user_id_str)\
+        .where("ativo", "==", True)\
+        .where("data_compra", ">=", inicio)\
+        .where("data_compra", "<=", fim)
+
+    for doc in gastos_ref.stream():
+        g = doc.to_dict() or {}
+        valor = self._float_para_decimal(g.get("valor_total", 0.0))
+        data_compra = g.get("data_compra")
+        if hasattr(data_compra, "to_datetime"):
+            data_compra = data_compra.to_datetime()
+        elif not isinstance(data_compra, datetime):
+            data_compra = inicio  # fallback seguro
+
+        itens.append({
+            "tipo": "Gasto",
+            "descricao": (g.get("descricao") or "").strip() or "(sem descrição)",
+            "valor": valor,
+            "data": data_compra,
+            "meta": {
+                "gasto_id": g.get("id") or doc.id,
+                "parcelas_total": g.get("parcelas_total"),
+            }
+        })
+
+    # --- PAGAMENTOS no período (pela data_pagamento) ---
+    pagamentos_ref = self.db.collection(COLLECTION_PAGAMENTOS)\
+        .where("user_id", "==", user_id_str)\
+        .where("data_pagamento", ">=", inicio)\
+        .where("data_pagamento", "<=", fim)
+
+    for doc in pagamentos_ref.stream():
+        p = doc.to_dict() or {}
+        valor = self._float_para_decimal(p.get("valor", 0.0))
+        data_pg = p.get("data_pagamento")
+        if hasattr(data_pg, "to_datetime"):
+            data_pg = data_pg.to_datetime()
+        elif not isinstance(data_pg, datetime):
+            data_pg = inicio
+
+        itens.append({
+            "tipo": "Pagamento",
+            "descricao": (p.get("descricao") or "Pagamento").strip(),
+            "valor": valor,
+            "data": data_pg,
+            "meta": {"pagamento_id": doc.id}
+        })
+
+    # ordenar por data real do evento
+    itens.sort(key=lambda x: x["data"])
+
+    total_gastos = sum((i["valor"] for i in itens if i["tipo"] == "Gasto"), Decimal("0.00"))
+    total_pag = sum((i["valor"] for i in itens if i["tipo"] == "Pagamento"), Decimal("0.00"))
+    saldo = (total_gastos - total_pag).quantize(Decimal("0.01"))
+
+    return itens, {
+        "parcelas_mes": total_gastos.quantize(Decimal("0.01")),      # nome antigo reaproveitado
+        "pagamentos_mes": total_pag.quantize(Decimal("0.01")),
+        "saldo_mes": saldo
+    }
+
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
