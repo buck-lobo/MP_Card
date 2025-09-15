@@ -690,6 +690,103 @@ class FirebaseCartaoCreditoBot:
             "pagamentos_mes": total_pag.quantize(Decimal("0.01")),
             "saldo_mes": saldo
         }
+    
+    def obter_extrato_fatura_aberta(self, user_id, hoje: datetime | None = None, fechamento_dia: int = 9):
+        """
+        Retorna os itens que irão para a PRÓXIMA fatura (ainda aberta) + pagamentos do período aberto.
+        - Parcela (n/N) de todos os gastos que tenham parcela na próxima fatura
+        - Para compras recentes (>= 10/..), a 1ª parcela (à vista ou n=1) entra na próxima fatura
+        - Pagamentos entre o início do período aberto e 'hoje'
+        """
+        user_id_str = str(user_id)
+        if hoje is None:
+            hoje = datetime.now()
+
+        # Referência da próxima fatura (onde as parcelas entrarão)
+        mes_fat, ano_fat = _proxima_fatura_ref(hoje, fechamento_dia)
+
+        itens = []
+
+        # --- Todas as PARCELAS que caem na PRÓXIMA fatura ---
+        gastos_ref = self.db.collection(COLLECTION_GASTOS)\
+            .where("user_id", "==", user_id_str)\
+            .where("ativo", "==", True)
+
+        for doc in gastos_ref.stream():
+            g = doc.to_dict() or {}
+            g = self._float_para_decimal(g)
+            g["doc_id"] = doc.id
+
+            # Qual parcela cai na próxima fatura?
+            mi, ai = int(g.get("mes_inicio")), int(g.get("ano_inicio"))
+            k = (ano_fat * 12 + mes_fat) - (ai * 12 + mi) + 1  # 1-based
+            parcelas_total = int(g.get("parcelas_total", 1))
+            if 1 <= k <= parcelas_total:
+                # Data para exibir:
+                # - se k == 1 -> usar data_compra real
+                # - senão -> data simbólica 1º/mes_fat
+                dt = g.get("data_compra")
+                if hasattr(dt, "to_datetime"):
+                    dt = dt.to_datetime()
+                if not isinstance(dt, datetime):
+                    dt = datetime(ano_fat, mes_fat, 1)
+
+                data_item = dt if k == 1 else datetime(ano_fat, mes_fat, 1)
+
+                itens.append({
+                    "tipo": "Parcela",
+                    "descricao": (g.get("descricao") or "").strip() or "(sem descrição)",
+                    "valor": self._float_para_decimal(g.get("valor_parcela", 0.0)),
+                    "data": data_item,
+                    "meta": {
+                        "gasto_id": g.get("id") or doc.id,
+                        "parcelas_total": parcelas_total,
+                        "mes_inicio": mi,
+                        "ano_inicio": ai,
+                    }
+                })
+
+        # --- PAGAMENTOS no PERÍODO ABERTO ---
+        inicio_aberto = _inicio_periodo_aberto(hoje, fechamento_dia)
+        pagamentos_ref = self.db.collection(COLLECTION_PAGAMENTOS)\
+            .where("user_id", "==", user_id_str)\
+            .where("data_pagamento", ">=", inicio_aberto)\
+            .where("data_pagamento", "<=", hoje)
+
+        for doc in pagamentos_ref.stream():
+            p = doc.to_dict() or {}
+            valor = self._float_para_decimal(p.get("valor", 0.0))
+            data_pg = p.get("data_pagamento")
+            if hasattr(data_pg, "to_datetime"):
+                data_pg = data_pg.to_datetime()
+            if not isinstance(data_pg, datetime):
+                data_pg = inicio_aberto
+
+            itens.append({
+                "tipo": "Pagamento",
+                "descricao": (p.get("descricao") or "Pagamento").strip(),
+                "valor": valor,
+                "data": data_pg,
+                "meta": {"pagamento_id": doc.id}
+            })
+
+        # Ordena (1ª parcela com data real; demais com 01/mes_fat)
+        itens.sort(key=lambda x: x["data"])
+
+        total_parcelas = sum((i["valor"] for i in itens if i["tipo"] == "Parcela"), Decimal("0.00"))
+        total_pag = sum((i["valor"] for i in itens if i["tipo"] == "Pagamento"), Decimal("0.00"))
+        saldo = (total_parcelas - total_pag).quantize(Decimal("0.01"))
+
+        totais = {
+            "parcelas_mes": total_parcelas.quantize(Decimal("0.01")),
+            "pagamentos_mes": total_pag.quantize(Decimal("0.01")),
+            "saldo_mes": saldo,
+            # passaremos mes/ano da fatura para formatação do n/N
+            "mes_fatura": mes_fat,
+            "ano_fatura": ano_fat,
+        }
+        return itens, totais
+
 
 
 # Instância global do bot
@@ -1059,17 +1156,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(texto_relatorio, reply_markup=keyboard, parse_mode="HTML")
     
     elif data == "menu_extrato_mes":
-        agora = datetime.now()
-        mes, ano = agora.month, agora.year
         user_id = update.effective_user.id
-        itens, totais = cartao_bot.obter_extrato_consumo_usuario(user_id, mes, ano)
-        texto = montar_texto_extrato(itens, totais, mes, ano)
+        itens, totais = cartao_bot.obter_extrato_fatura_aberta(user_id)
+        # passe mes/ano “qualquer”, o formatter usará mes_fatura/ano_fatura vindos de 'totais'
+        texto = montar_texto_extrato(itens, totais, mes=0, ano=0)
         await reply_long(
             query,
             texto,
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu_principal")]])
         )
+
+
 
     elif data == "menu_extrato_admin":
         # somente admin
@@ -1669,7 +1767,39 @@ def _janela_ciclo(mes:int, ano:int, fechamento_dia:int=9):
     # (resultado: 00:00:00 do dia 10)
     return inicio, fim
 
+def _proxima_fatura_ref(hoje: datetime, fechamento_dia: int = 9):
+    """
+    Retorna (mes_fatura, ano_fatura) da fatura ABERTA atual.
+    Regras: se hoje.day > fechamento, a próxima fatura é (mês+1); caso contrário, é o mês atual.
+    """
+    mes, ano = hoje.month, hoje.year
+    if hoje.day > fechamento_dia:
+        # fatura que fechará no próximo mês
+        if mes == 12:
+            return 1, ano + 1
+        return mes + 1, ano
+    # ainda estamos antes/na data de fechamento -> a próxima fatura é do próprio mês
+    return mes, ano
+
+def _inicio_periodo_aberto(hoje: datetime, fechamento_dia: int = 9):
+    """
+    Retorna o datetime do início do período aberto (00:00 do dia 10) após o último fechamento.
+    """
+    if hoje.day > fechamento_dia:
+        # abertura foi dia 10 deste mês
+        return datetime(hoje.year, hoje.month, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
+    # abertura foi dia 10 do mês anterior
+    if hoje.month == 1:
+        return datetime(hoje.year - 1, 12, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
+    return datetime(hoje.year, hoje.month - 1, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
+
+
 def montar_texto_extrato(itens, totais, mes, ano):
+    # Se vier de fatura aberta, use mes/ano da fatura (tá em totais)
+    mes_exibe = int(totais.get("mes_fatura", mes))
+    ano_exibe = int(totais.get("ano_fatura", ano))
+    linhas.append(f"📜 <b>Extrato {mes_exibe:02d}/{ano_exibe}</b>\n")
+
     def _fmt_valor_brl(d):
         return f"R$ {d:.2f}".replace(".", ",")
 
@@ -1718,7 +1848,7 @@ def montar_texto_extrato(itens, totais, mes, ano):
 
             #     # linha limpa: data — descrição (n/total) — valor
             #     linhas.append(f"• {data_str} — {desc}{marcador} — {valor}")
-            if i["tipo"] in ("Parcela", "Gasto"):
+            if i["tipo"] == "Gasto":
                 meta = i.get("meta") or {}
                 # marcador só se houver info de parcelas (mantém n/total quando existir)
                 n_atual = _calc_parcela_atual(meta, mes, ano) if i["tipo"] == "Parcela" else None
@@ -1727,8 +1857,15 @@ def montar_texto_extrato(itens, totais, mes, ano):
                 if n_atual:
                     marcador = f" ({n_atual}/{int(total)})" if total else f" ({n_atual})"
                 linhas.append(f"• {data_str} — {desc}{marcador} — {valor}")
-
-
+            elif i["tipo"] == "Parcela":
+                meta = i.get("meta") or {}
+                n_atual = _calc_parcela_atual(meta, mes_exibe, ano_exibe)
+                total = meta.get("parcelas_total")
+                marcador = f" ({n_atual}/{int(total)})" if (n_atual and total) else (f" ({n_atual})" if n_atual else "")
+                data_str = i["data"].strftime("%d/%m")
+                valor = _fmt_valor_brl(i["valor"])
+                desc = i.get("descricao") or "(sem descrição)"
+                linhas.append(f"• {data_str} — {desc}{marcador} — {valor}")
             else:  # Pagamento
                 # manter destaque sutil para pagamentos
                 linhas.append(f"• {data_str} — <b>Pagamento</b> — {desc} — {valor}")
