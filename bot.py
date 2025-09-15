@@ -617,57 +617,72 @@ class FirebaseCartaoCreditoBot:
     
     def obter_extrato_consumo_usuario(self, user_id, mes:int, ano:int, fechamento_dia:int=9):
         """
-        Extrato baseado no PERÍODO DE CONSUMO (data_compra entre 10/prev e 09/mes).
-        Também inclui pagamentos cuja data_pagamento cai no mesmo período.
-        Retorna (itens, totais) no mesmo formato do extrato atual.
+        Extrato de uma FATURA FECHADA (consumo de 10/mes-1 a 09/mes).
+        Emite PARCELAS (n/N) que caem nessa fatura; à vista => n=1/N=1
+        Também inclui pagamentos dentro do mesmo período.
         """
-        from decimal import Decimal
         user_id_str = str(user_id)
+        from decimal import Decimal
         inicio, fim = _janela_ciclo(mes, ano, fechamento_dia)
 
         itens = []
 
-        # --- GASTOS no período (pela data_compra) ---
-        # Firestore range: where >= inicio AND <= fim (precisa index se não existir)
-        gastos_ref = self.db.collection(COLLECTION_GASTOS)\
-            .where("user_id", "==", user_id_str)\
-            .where("ativo", "==", True)\
-            .where("data_compra", ">=", inicio)\
+        # --- VARRE compras e transforma em "Parcela" se o mês consultado tem parcela ---
+        gastos_ref = (
+            self.db.collection(COLLECTION_GASTOS)
+            .where("user_id", "==", user_id_str)
+            .where("ativo", "==", True)
+            # filtro por data_compra ajuda index, mas quem define inclusão é 'k' abaixo
             .where("data_compra", "<=", fim)
-
+        )
         for doc in gastos_ref.stream():
             g = doc.to_dict() or {}
-            valor = self._float_para_decimal(g.get("valor_total", 0.0))
-            data_compra = g.get("data_compra")
-            if hasattr(data_compra, "to_datetime"):
-                data_compra = data_compra.to_datetime()
-            elif not isinstance(data_compra, datetime):
-                data_compra = inicio  # fallback seguro
+            g = self._float_para_decimal(g)
+            g["doc_id"] = doc.id
 
-            itens.append({
-                "tipo": "Gasto",
-                "descricao": (g.get("descricao") or "").strip() or "(sem descrição)",
-                "valor": valor,
-                "data": data_compra,
-                "meta": {
-                    "gasto_id": g.get("id") or doc.id,
-                    "parcelas_total": g.get("parcelas_total"),
-                }
-            })
+            mi, ai = int(g.get("mes_inicio")), int(g.get("ano_inicio"))
+            total = int(g.get("parcelas_total", 1))
+            # parcela k que cai na fatura (mes/ano) consultada
+            k = (ano * 12 + mes) - (ai * 12 + mi) + 1
+            if 1 <= k <= total:
+                # data exibida:
+                # - se k == 1: data real da compra
+                # - senão: 01/mes (fatura consultada)
+                dt = g.get("data_compra")
+                if hasattr(dt, "to_datetime"):
+                    dt = dt.to_datetime()
+                if not isinstance(dt, datetime):
+                    dt = datetime(ano, mes, 1)
 
-        # --- PAGAMENTOS no período (pela data_pagamento) ---
-        pagamentos_ref = self.db.collection(COLLECTION_PAGAMENTOS)\
-            .where("user_id", "==", user_id_str)\
-            .where("data_pagamento", ">=", inicio)\
+                data_item = dt if k == 1 else datetime(ano, mes, 1)
+
+                itens.append({
+                    "tipo": "Parcela",
+                    "descricao": (g.get("descricao") or "").strip() or "(sem descrição)",
+                    "valor": self._float_para_decimal(g.get("valor_parcela", 0.0)),
+                    "data": data_item,
+                    "meta": {
+                        "gasto_id": g.get("id") or doc.id,
+                        "parcelas_total": total,
+                        "mes_inicio": mi,
+                        "ano_inicio": ai,
+                    }
+                })
+
+        # --- PAGAMENTOS dentro do período fechado ---
+        pagamentos_ref = (
+            self.db.collection(COLLECTION_PAGAMENTOS)
+            .where("user_id", "==", user_id_str)
+            .where("data_pagamento", ">=", inicio)
             .where("data_pagamento", "<=", fim)
-
+        )
         for doc in pagamentos_ref.stream():
             p = doc.to_dict() or {}
             valor = self._float_para_decimal(p.get("valor", 0.0))
             data_pg = p.get("data_pagamento")
             if hasattr(data_pg, "to_datetime"):
                 data_pg = data_pg.to_datetime()
-            elif not isinstance(data_pg, datetime):
+            if not isinstance(data_pg, datetime):
                 data_pg = inicio
 
             itens.append({
@@ -675,21 +690,24 @@ class FirebaseCartaoCreditoBot:
                 "descricao": (p.get("descricao") or "Pagamento").strip(),
                 "valor": valor,
                 "data": data_pg,
-                "meta": {"pagamento_id": doc.id}
+                "meta": {"pagamento_id": doc.id},
             })
 
-        # ordenar por data real do evento
         itens.sort(key=lambda x: x["data"])
 
-        total_gastos = sum((i["valor"] for i in itens if i["tipo"] == "Gasto"), Decimal("0.00"))
+        total_parcelas = sum((i["valor"] for i in itens if i["tipo"] == "Parcela"), Decimal("0.00"))
         total_pag = sum((i["valor"] for i in itens if i["tipo"] == "Pagamento"), Decimal("0.00"))
-        saldo = (total_gastos - total_pag).quantize(Decimal("0.01"))
+        saldo = (total_parcelas - total_pag).quantize(Decimal("0.01"))
 
-        return itens, {
-            "parcelas_mes": total_gastos.quantize(Decimal("0.01")),      # nome antigo reaproveitado
+        totais = {
+            "parcelas_mes": total_parcelas.quantize(Decimal("0.01")),
             "pagamentos_mes": total_pag.quantize(Decimal("0.01")),
-            "saldo_mes": saldo
+            "saldo_mes": saldo,
+            "mes_fatura": mes,
+            "ano_fatura": ano,
         }
+        return itens, totais
+
     
     def obter_extrato_fatura_aberta(self, user_id, hoje: datetime | None = None, fechamento_dia: int = 9):
         """
@@ -1030,29 +1048,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif data == "menu_fatura_atual":
-        mes_atual = datetime.now().month
-        ano_atual = datetime.now().year
-        valor_fatura, gastos_mes = cartao_bot.calcular_fatura_usuario(user_id, mes_atual, ano_atual)
-        
-        if valor_fatura > 0:
-            texto_fatura = f"💳 <b>Fatura de {mes_atual:02d}/{ano_atual}</b>\n\n"
-            texto_fatura += f"💰 <b>Total a pagar:</b> R$ {valor_fatura:.2f}\n\n"
-            texto_fatura += f"📋 <b>Gastos do mês ({len(gastos_mes)} itens):</b>\n"
-            
-            for gasto in gastos_mes[:5]:  # Mostrar apenas os primeiros 5
-                texto_fatura += f"• {gasto['descricao']}: R$ {gasto['valor_parcela']:.2f}\n"
-            
-            if len(gastos_mes) > 5:
-                texto_fatura += f"... e mais {len(gastos_mes) - 5} itens.\n"
-        else:
-            texto_fatura = f"💳 <b>Fatura de {mes_atual:02d}/{ano_atual}</b>\n\n"
-            texto_fatura += "✅ <b>Nenhum gasto neste mês!</b>"
-        
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔙 Voltar", callback_data="menu_principal")
-        ]])
-        
-        await query.edit_message_text(texto_fatura, reply_markup=keyboard, parse_mode="HTML")
+        # Mostra a fatura ABERTA do próprio usuário
+        itens, totais = cartao_bot.obter_extrato_fatura_aberta(user_id)
+        texto = montar_texto_extrato(itens, totais, mes=0, ano=0)
+
+        await reply_long(
+            query,
+            texto,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Voltar", callback_data="menu_principal")]])
+        )
+
     
     elif data == "menu_meus_gastos":
         gastos = cartao_bot.obter_gastos_usuario(user_id)
@@ -1500,10 +1506,14 @@ async def processar_consulta_usuario(update: Update, context: ContextTypes.DEFAU
             nome = usuario_encontrado['name']
             username = usuario_encontrado.get('username', 'N/A')
             
-            # Obter dados detalhados
             gastos = cartao_bot.obter_gastos_usuario(user_id_consultado)
             pagamentos = cartao_bot.obter_pagamentos_usuario(user_id_consultado)
-            valor_fatura, gastos_mes = cartao_bot.calcular_fatura_usuario(user_id_consultado)
+
+            # Fatura "atual" = fatura ABERTA (o que vai para a próxima fatura)
+            itens_fat, totais_fat = cartao_bot.obter_extrato_fatura_aberta(user_id_consultado)
+            valor_fatura = totais_fat["parcelas_mes"]
+            saldo_mes    = totais_fat["saldo_mes"]
+
             
             # Status do saldo
             if saldo > 0:
@@ -1520,7 +1530,8 @@ async def processar_consulta_usuario(update: Update, context: ContextTypes.DEFAU
             texto_consulta += f"👤 <b>Nome:</b> {nome}\n"
             texto_consulta += f"📱 <b>Username:</b> @{username}\n"
             texto_consulta += f"{emoji_saldo} <b>Saldo:</b> {status_saldo}\n"
-            texto_consulta += f"💳 <b>Fatura atual:</b> R$ {valor_fatura:.2f}\n"
+            texto_consulta += f"💳 <b>Fatura atual (aberta):</b> R$ {valor_fatura:.2f}\n"
+            texto_consulta += f"🧮 <b>Saldo do mês:</b> R$ {saldo_mes:.2f}\n"
             texto_consulta += f"📋 <b>Total de gastos:</b> {len(gastos)}\n"
             texto_consulta += f"💸 <b>Total de pagamentos:</b> {len(pagamentos)}\n"
             texto_consulta += f"☁️ <b>Dados do Firebase</b>"
@@ -1572,15 +1583,25 @@ async def processar_extrato_admin(update, context, texto: str):
             return
 
         target_id_str = str(u["user_id"])
-        itens, totais = cartao_bot.obter_extrato_consumo_usuario(target_id_str, mes, ano)
-        nome_mostrar = u.get("name") or f"@{u.get('username')}" or u["user_id"]
 
-        texto_resp = (f"👤 <b>{nome_mostrar}</b>\n" +
-                      montar_texto_extrato(itens, totais, mes, ano))
+        # Só nome → fatura aberta (o que vai para a próxima fatura).
+        # Nome + mes + ano → fatura fechada (consumo 10→09).
+        if len(partes) == 1:
+            itens, totais = cartao_bot.obter_extrato_fatura_aberta(target_id_str)
+            texto_resp = (f"👤 <b>{u.get('name') or '@'+(u.get('username') or target_id_str)}</b>\n" +
+                        montar_texto_extrato(itens, totais, mes=0, ano=0))
+        else:
+            itens, totais = cartao_bot.obter_extrato_consumo_usuario(target_id_str, mes, ano)
+            texto_resp = (f"👤 <b>{u.get('name') or '@'+(u.get('username') or target_id_str)}</b>\n" +
+                        montar_texto_extrato(itens, totais, mes, ano))
+
         await reply_long(
-            update, 
-            texto_resp, 
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu_principal")]]))
+            update,
+            texto_resp,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu_principal")]]),
+            parse_mode="HTML",
+        )
+
     except Exception as e:
         logger.error(f"Erro no extrato admin: {e}")
         await update.message.reply_text(
@@ -1796,7 +1817,6 @@ def _inicio_periodo_aberto(hoje: datetime, fechamento_dia: int = 9):
 
 def montar_texto_extrato(itens, totais, mes, ano):
     def _fmt_valor_brl(d):
-        # aceita Decimal/float/str com fallback
         if not isinstance(d, Decimal):
             try:
                 d = Decimal(str(d))
@@ -1805,11 +1825,6 @@ def montar_texto_extrato(itens, totais, mes, ano):
         return f"R$ {d.quantize(Decimal('0.01')):.2f}".replace(".", ",")
 
     def _calc_parcela_atual(meta, m, a):
-        """
-        Retorna o número da parcela no mês/ano informados (1-based),
-        ou None se não der para calcular.
-        Espera meta['mes_inicio'], meta['ano_inicio'].
-        """
         try:
             mi = int(meta.get("mes_inicio"))
             ai = int(meta.get("ano_inicio"))
@@ -1820,26 +1835,22 @@ def montar_texto_extrato(itens, totais, mes, ano):
         except Exception:
             return None
 
-    # Se vieram mes/ano de fatura dentro de 'totais' (ex.: fatura aberta), usa-os
+    # usa mês/ano da fatura (quando vierem em 'totais') – útil p/ fatura aberta
     mes_exibe = int(totais.get("mes_fatura", mes) or mes or 0)
     ano_exibe = int(totais.get("ano_fatura", ano) or ano or 0)
 
     linhas = []
-    if mes_exibe and ano_exibe:
-        linhas.append(f"📜 <b>Extrato {mes_exibe:02d}/{ano_exibe}</b>\n")
-    else:
-        linhas.append("📜 <b>Extrato</b>\n")
+    titulo = f"📜 <b>Extrato {mes_exibe:02d}/{ano_exibe}</b>" if (mes_exibe and ano_exibe) else "📜 <b>Extrato</b>"
+    linhas.append(titulo + "\n")
 
     if not itens:
         linhas.append("Não há movimentações neste mês.")
     else:
         for i in itens:
-            # data segura
             dt = i.get("data")
             if hasattr(dt, "to_datetime"):
                 dt = dt.to_datetime()
             if not isinstance(dt, datetime):
-                # fallback: usa mês/ano de exibição ou hoje
                 base = datetime.now()
                 if mes_exibe and ano_exibe:
                     base = datetime(ano_exibe, mes_exibe, 1)
@@ -1848,8 +1859,7 @@ def montar_texto_extrato(itens, totais, mes, ano):
 
             desc = (i.get("descricao") or "").strip() or "(sem descrição)"
             valor = _fmt_valor_brl(i.get("valor", 0))
-
-            tipo = i.get("tipo")
+            tipo  = i.get("tipo")
 
             if tipo == "Parcela":
                 meta = i.get("meta") or {}
@@ -1861,11 +1871,10 @@ def montar_texto_extrato(itens, totais, mes, ano):
                 linhas.append(f"• {data_str} — {desc}{marcador} — {valor}")
 
             elif tipo == "Gasto":
-                # gasto à vista/1ª parcela (mostra data real da compra)
+                # fallback p/ caso raro de gasto à vista no pipeline fechado
                 meta = i.get("meta") or {}
                 n_atual = None
                 total = meta.get("parcelas_total")
-                # se por algum motivo vier com meta de parcelas, calcula n/N também
                 if meta.get("mes_inicio") and meta.get("ano_inicio"):
                     n_atual = _calc_parcela_atual(meta, mes_exibe or mes, ano_exibe or ano)
                 marcador = f" ({n_atual}/{int(total)})" if (n_atual and total) else (f" ({n_atual})" if n_atual else "")
@@ -1874,13 +1883,13 @@ def montar_texto_extrato(itens, totais, mes, ano):
             else:  # Pagamento
                 linhas.append(f"• {data_str} — <b>Pagamento</b> — {desc} — {valor}")
 
-    # Totais (com defaults para evitar KeyError)
     linhas.append("\n<b>Totais do mês</b>")
     linhas.append(f"Parcelas: {_fmt_valor_brl(totais.get('parcelas_mes', 0))}")
     linhas.append(f"Pagamentos: {_fmt_valor_brl(totais.get('pagamentos_mes', 0))}")
     linhas.append(f"<b>Saldo do mês:</b> {_fmt_valor_brl(totais.get('saldo_mes', 0))}")
 
     return "\n".join(linhas)
+
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     err = context.error
