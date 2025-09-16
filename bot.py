@@ -4,7 +4,7 @@
 import asyncio
 import logging, os, re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
@@ -41,6 +41,23 @@ logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 _token_in_url = re.compile(r"bot\d{6,}:[A-Za-z0-9_-]{30,}")
 # 2) Token “cru” (sem o 'bot' antes) — útil se alguém logar só o valor do token
 _token_raw = re.compile(r"\d{6,}:[A-Za-z0-9_-]{30,}")
+
+def to_naive_utc(dt):
+    """
+    Converte datetime com/sem tz para 'naive' em UTC.
+    Aceita Firestore Timestamp (tem .to_datetime()).
+    """
+    if dt is None:
+        return None
+    if hasattr(dt, "to_datetime"):
+        dt = dt.to_datetime()
+    if isinstance(dt, datetime):
+        # se vier com tz, converte para UTC e remove tzinfo
+        if dt.tzinfo is not None:
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+    return dt
+
 
 
 # ===================== GERENCIADOR DE FATURA =====================
@@ -603,14 +620,15 @@ class FirebaseCartaoCreditoBot:
         for doc in pagamentos_ref.stream():
             p = doc.to_dict() or {}
             valor = self._float_para_decimal(p.get("valor", 0.0))
-            data_pg = p.get("data_pagamento")
-            # data_pagamento pode ser timestamp; reforce para datetime
-            if hasattr(data_pg, "to_datetime"):
-                data_pg = data_pg.to_datetime()
-            elif isinstance(data_pg, (int, float)):
-                data_pg = datetime.fromtimestamp(data_pg)
-            elif not isinstance(data_pg, datetime):
-                data_pg = datetime(int(ano), int(mes), 1)
+            data_pg_raw = p.get("data_pagamento")
+            data_pg = to_naive_utc(data_pg_raw) or datetime(int(ano), int(mes), 1)
+            # # data_pagamento pode ser timestamp; reforce para datetime
+            # if hasattr(data_pg, "to_datetime"):
+            #     data_pg = data_pg.to_datetime()
+            # elif isinstance(data_pg, (int, float)):
+            #     data_pg = datetime.fromtimestamp(data_pg)
+            # elif not isinstance(data_pg, datetime):
+            #     data_pg = datetime(int(ano), int(mes), 1)
 
             itens.append({
                 "tipo": "Pagamento",
@@ -699,11 +717,12 @@ class FirebaseCartaoCreditoBot:
                 # data exibida:
                 # - se k == 1: data real da compra
                 # - senão: 01/mes (fatura consultada)
-                dt = g.get("data_compra")
-                if hasattr(dt, "to_datetime"):
-                    dt = dt.to_datetime()
-                if not isinstance(dt, datetime):
-                    dt = datetime(ano, mes, 1)
+                dt_raw = g.get("data_compra")
+                dt = to_naive_utc(dt_raw) or datetime(ano_fat, mes_fat, 1)
+                # if hasattr(dt, "to_datetime"):
+                #     dt = dt.to_datetime()
+                # if not isinstance(dt, datetime):
+                #     dt = datetime(ano, mes, 1)
 
                 data_item = dt if k == 1 else datetime(ano, mes, 1)
 
@@ -730,11 +749,12 @@ class FirebaseCartaoCreditoBot:
         for doc in pagamentos_ref.stream():
             p = doc.to_dict() or {}
             valor = self._float_para_decimal(p.get("valor", 0.0))
-            data_pg = p.get("data_pagamento")
-            if hasattr(data_pg, "to_datetime"):
-                data_pg = data_pg.to_datetime()
-            if not isinstance(data_pg, datetime):
-                data_pg = inicio
+            data_pg_raw = p.get("data_pagamento")
+            data_pg = to_naive_utc(data_pg_raw) or inicio
+            # if hasattr(data_pg, "to_datetime"):
+            #     data_pg = data_pg.to_datetime()
+            # if not isinstance(data_pg, datetime):
+            #     data_pg = inicio
 
             itens.append({
                 "tipo": "Pagamento",
@@ -770,6 +790,7 @@ class FirebaseCartaoCreditoBot:
         user_id_str = str(user_id)
         if hoje is None:
             hoje = datetime.now()
+        hoje = to_naive_utc(hoje)
 
         # Referência da próxima fatura (onde as parcelas entrarão)
         mes_fat, ano_fat = self.fatura_manager.get_proxima_fatura_ref(hoje, fechamento_dia)
@@ -795,11 +816,12 @@ class FirebaseCartaoCreditoBot:
                 # Data para exibir:
                 # - se k == 1 -> usar data_compra real
                 # - senão -> data simbólica 1º/mes_fat
-                dt = g.get("data_compra")
-                if hasattr(dt, "to_datetime"):
-                    dt = dt.to_datetime()
-                if not isinstance(dt, datetime):
-                    dt = datetime(ano_fat, mes_fat, 1)
+                dt_raw = g.get("data_compra")
+                dt = to_naive_utc(dt_raw) or datetime(ano_fat, mes_fat, 1)
+                # if hasattr(dt, "to_datetime"):
+                #     dt = dt.to_datetime()
+                # if not isinstance(dt, datetime):
+                #     dt = datetime(ano_fat, mes_fat, 1)
 
                 data_item = dt if k == 1 else datetime(ano_fat, mes_fat, 1)
 
@@ -827,11 +849,12 @@ class FirebaseCartaoCreditoBot:
         for doc in pagamentos_ref.stream():
             p = doc.to_dict() or {}
             valor = self._float_para_decimal(p.get("valor", 0.0))
-            data_pg = p.get("data_pagamento")
-            if hasattr(data_pg, "to_datetime"):
-                data_pg = data_pg.to_datetime()
-            if not isinstance(data_pg, datetime):
-                data_pg = inicio_aberto
+            data_pg_raw = p.get("data_pagamento")
+            data_pg = to_naive_utc(data_pg_raw) or inicio_aberto
+            # if hasattr(data_pg, "to_datetime"):
+            #     data_pg = data_pg.to_datetime()
+            # if not isinstance(data_pg, datetime):
+            #     data_pg = inicio_aberto
 
             itens.append({
                 "tipo": "Pagamento",
@@ -1862,8 +1885,9 @@ def montar_texto_extrato(itens, totais, mes, ano, fatura_manager: Fatura):
     else:
         for i in itens:
             dt = i.get("data")
-            if hasattr(dt, "to_datetime"):
-                dt = dt.to_datetime()
+            # if hasattr(dt, "to_datetime"):
+            #     dt = dt.to_datetime()
+            dt = to_naive_utc(i.get("data"))
             if not isinstance(dt, datetime):
                 base = datetime.now()
                 if mes_exibe and ano_exibe:
