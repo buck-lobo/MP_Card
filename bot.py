@@ -43,20 +43,31 @@ _token_in_url = re.compile(r"bot\d{6,}:[A-Za-z0-9_-]{30,}")
 _token_raw = re.compile(r"\d{6,}:[A-Za-z0-9_-]{30,}")
 
 def to_naive_utc(dt):
-    """
-    Converte datetime com/sem tz para 'naive' em UTC.
-    Aceita Firestore Timestamp (tem .to_datetime()).
-    """
+    """Converte Firestore Timestamp, datetime aware ou epoch -> datetime naive em UTC."""
     if dt is None:
         return None
     if hasattr(dt, "to_datetime"):
         dt = dt.to_datetime()
-    if isinstance(dt, datetime):
-        # se vier com tz, converte para UTC e remove tzinfo
-        if dt.tzinfo is not None:
-            return dt.astimezone(timezone.utc).replace(tzinfo=None)
-        return dt
+    if isinstance(dt, (int, float)):
+        dt = datetime.fromtimestamp(dt, tz=timezone.utc)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt
+
+def efetivo_inicio_fatura(mes_inicio:int, ano_inicio:int, dia_compra:int|None, fechamento_dia:int=9):
+    """
+    A primeira cobrança entra na fatura:
+      - do mesmo mês, se a compra foi até o dia de fechamento;
+      - do mês seguinte, se a compra foi após o dia de fechamento.
+    Retorna (mes0, ano0).
+    """
+    m0, a0 = int(mes_inicio), int(ano_inicio)
+    if dia_compra is not None and int(dia_compra) > int(fechamento_dia):
+        m0 += 1
+        if m0 > 12:
+            m0 = 1
+            a0 += 1
+    return m0, a0
 
 
 
@@ -622,14 +633,6 @@ class FirebaseCartaoCreditoBot:
             valor = self._float_para_decimal(p.get("valor", 0.0))
             data_pg_raw = p.get("data_pagamento")
             data_pg = to_naive_utc(data_pg_raw) or datetime(int(ano), int(mes), 1)
-            # # data_pagamento pode ser timestamp; reforce para datetime
-            # if hasattr(data_pg, "to_datetime"):
-            #     data_pg = data_pg.to_datetime()
-            # elif isinstance(data_pg, (int, float)):
-            #     data_pg = datetime.fromtimestamp(data_pg)
-            # elif not isinstance(data_pg, datetime):
-            #     data_pg = datetime(int(ano), int(mes), 1)
-
             itens.append({
                 "tipo": "Pagamento",
                 "descricao": (p.get("descricao") or "Pagamento").strip(),
@@ -711,31 +714,28 @@ class FirebaseCartaoCreditoBot:
 
             mi, ai = int(g.get("mes_inicio")), int(g.get("ano_inicio"))
             total = int(g.get("parcelas_total", 1))
-            # parcela k que cai na fatura (mes/ano) consultada
-            k = (ano * 12 + mes) - (ai * 12 + mi) + 1
+            # dia real da compra (para decidir se a 1ª cobrança foi neste mês ou no próximo)
+            dt_compra = to_naive_utc(g.get("data_compra"))
+            dia_compra = dt_compra.day if isinstance(dt_compra, datetime) else None
+
+            # mês/ano da 1ª cobrança (ajusta se compra foi após o dia de fechamento)
+            mi0, ai0 = efetivo_inicio_fatura(mi, ai, dia_compra, fechamento_dia)
+            # parcela k que cai na fatura fechada consultada (1-based)
+            k = (ano * 12 + mes) - (ai0 * 12 + mi0) + 1
             if 1 <= k <= total:
-                # data exibida:
-                # - se k == 1: data real da compra
-                # - senão: 01/mes (fatura consultada)
-                dt_raw = g.get("data_compra")
-                dt = to_naive_utc(dt_raw) or datetime(ano_fat, mes_fat, 1)
-                # if hasattr(dt, "to_datetime"):
-                #     dt = dt.to_datetime()
-                # if not isinstance(dt, datetime):
-                #     dt = datetime(ano, mes, 1)
-
+                # data exibida: k==1 usa a data real; senão, 01/mes da fatura consultada
+                dt = dt_compra or datetime(ano, mes, 1)
                 data_item = dt if k == 1 else datetime(ano, mes, 1)
-
                 itens.append({
                     "tipo": "Parcela",
                     "descricao": (g.get("descricao") or "").strip() or "(sem descrição)",
-                    "valor": self._float_para_decimal(g.get("valor_parcela", 0.0)),
+                    "valor": self._float_para_decimal(g.get("valor_parcela", g.get("valor_total", 0.0))),
                     "data": data_item,
                     "meta": {
                         "gasto_id": g.get("id") or doc.id,
                         "parcelas_total": total,
-                        "mes_inicio": mi,
-                        "ano_inicio": ai,
+                        "mes_inicio": mi, "ano_inicio": ai,
+                        "dia_compra": dia_compra,
                     }
                 })
 
@@ -751,17 +751,19 @@ class FirebaseCartaoCreditoBot:
             valor = self._float_para_decimal(p.get("valor", 0.0))
             data_pg_raw = p.get("data_pagamento")
             data_pg = to_naive_utc(data_pg_raw) or inicio
-            # if hasattr(data_pg, "to_datetime"):
-            #     data_pg = data_pg.to_datetime()
-            # if not isinstance(data_pg, datetime):
-            #     data_pg = inicio
-
+            meta = {
+                "gasto_id": g.get("id") or doc.id,
+                "parcelas_total": total,
+                "mes_inicio": mi,
+                "ano_inicio": ai,
+                "dia_compra": (dt.day if isinstance(dt, datetime) else 1),  # <-- ADICIONE ISTO
+            }
             itens.append({
                 "tipo": "Pagamento",
                 "descricao": (p.get("descricao") or "Pagamento").strip(),
                 "valor": valor,
                 "data": data_pg,
-                "meta": {"pagamento_id": doc.id},
+                "meta": meta,
             })
 
         itens.sort(key=lambda x: x["data"])
@@ -1863,11 +1865,9 @@ def montar_texto_extrato(itens, totais, mes, ano, fatura_manager: Fatura):
         try:
             mi = int(meta.get("mes_inicio"))
             ai = int(meta.get("ano_inicio"))
-            if not (1 <= mi <= 12):
-                return None
-            # Calcula a diferença em meses entre a data da fatura e a data de início do gasto
-            # A fatura é 1-based, então (mes_fatura, ano_fatura) - (mes_inicio, ano_inicio) + 1
-            i = (int(a) * 12 + int(m)) - (ai * 12 + mi)
+            dia_compra = meta.get("dia_compra")
+            mi0, ai0 = efetivo_inicio_fatura(mi, ai, dia_compra, getattr(fatura_manager, "fechamento_dia", 9))
+            i = (int(a) * 12 + int(m)) - (ai0 * 12 + mi0)
             return i + 1 if i >= 0 else None
         except Exception:
             return None
