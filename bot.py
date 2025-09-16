@@ -42,6 +42,54 @@ _token_in_url = re.compile(r"bot\d{6,}:[A-Za-z0-9_-]{30,}")
 # 2) Token “cru” (sem o 'bot' antes) — útil se alguém logar só o valor do token
 _token_raw = re.compile(r"\d{6,}:[A-Za-z0-9_-]{30,}")
 
+
+# ===================== GERENCIADOR DE FATURA =====================
+class Fatura:
+    """Regras de calendário de fatura:
+    - Fatura FECHADA (mês X): consumo de 10/(X-1) 00:00:00 até 09/X 23:59:59.
+    - Fatura ABERTA: do instante logo após o último fechamento até 'agora'.
+    """
+    def __init__(self, fechamento_dia: int = 9):
+        self.fechamento_dia = int(fechamento_dia)
+
+    def get_periodo_fatura_fechada(self, mes: int, ano: int, fechamento_dia: int | None = None):
+        d = int(fechamento_dia or self.fechamento_dia)
+        # início = 10 do mês anterior 00:00:00
+        if mes == 1:
+            ano_prev, mes_prev = ano - 1, 12
+        else:
+            ano_prev, mes_prev = ano, mes - 1
+        inicio = datetime(ano_prev, mes_prev, d, 23, 59, 59, 999999) + timedelta(seconds=1)  # 10/mes_prev 00:00:00
+        fim = datetime(ano, mes, d, 23, 59, 59, 999999)  # 09/mes 23:59:59
+        return inicio, fim
+
+    def get_proxima_fatura_ref(self, hoje: datetime | None = None, fechamento_dia: int | None = None):
+        d = int(fechamento_dia or self.fechamento_dia)
+        if hoje is None:
+            hoje = datetime.now()
+        if hoje.day > d:
+            # próxima fatura é do mês seguinte
+            if hoje.month == 12:
+                return 1, hoje.year + 1
+            return hoje.month + 1, hoje.year
+        # ainda no ciclo atual
+        return hoje.month, hoje.year
+
+    def get_inicio_periodo_aberto(self, hoje: datetime | None = None, fechamento_dia: int | None = None):
+        d = int(fechamento_dia or self.fechamento_dia)
+        if hoje is None:
+            hoje = datetime.now()
+        if hoje.day > d:
+            start = datetime(hoje.year, hoje.month, d, 23, 59, 59, 999999) + timedelta(seconds=1)
+        else:
+            if hoje.month == 1:
+                start = datetime(hoje.year - 1, 12, d, 23, 59, 59, 999999) + timedelta(seconds=1)
+            else:
+                start = datetime(hoje.year, hoje.month - 1, d, 23, 59, 59, 999999) + timedelta(seconds=1)
+        return start
+# ================================================================
+
+
 class RedactTokenFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
@@ -1954,84 +2002,6 @@ async def start_bot():
     except Exception as e:
         logger.exception(f"Falha inesperada no start_bot: {e}")
         raise
-
-class Fatura: 
-    """Classe para gerenciar o ciclo de faturamento do cartão de crédito.""" 
-    def __init__(self, dia_fechamento=9): 
-        self.dia_fechamento = dia_fechamento 
- 
-    def get_periodo_fatura_atual(self, data_base=None): 
-        """Retorna o período da fatura atual (aberta).""" 
-        if data_base is None: 
-            data_base = datetime.now() 
- 
-        if data_base.day > self.dia_fechamento: 
-            # A fatura atual começou no dia `dia_fechamento` + 1 deste mês 
-            inicio_fatura = datetime(data_base.year, data_base.month, self.dia_fechamento + 1) 
-            # E fechará no próximo mês 
-            if data_base.month == 12: 
-                fim_fatura = datetime(data_base.year + 1, 1, self.dia_fechamento) 
-            else: 
-                fim_fatura = datetime(data_base.year, data_base.month + 1, self.dia_fechamento) 
-        else: 
-            # A fatura atual começou no mês anterior 
-            if data_base.month == 1: 
-                inicio_fatura = datetime(data_base.year - 1, 12, self.dia_fechamento + 1) 
-            else: 
-                inicio_fatura = datetime(data_base.year, data_base.month - 1, self.dia_fechamento + 1) 
-            # E fechará neste mês 
-            fim_fatura = datetime(data_base.year, data_base.month, self.dia_fechamento) 
- 
-        return inicio_fatura, fim_fatura
-
-    def get_periodo_fatura_fechada(self, mes: int, ano: int, fechamento_dia: int = 9):
-        """
-        Para um (mes, ano) de FATURA, retorna (inicio, fim) do período de consumo.
-        Ex.: mes=8, ano=2025 => [2025-07-10 00:00:00, 2025-08-09 23:59:59]
-        """
-        # o ciclo termina sempre no 'fechamento_dia' do MES informado
-        fim = datetime(ano, mes, fechamento_dia, 23, 59, 59, 999999)
-        # início é dia seguinte ao fechamento do mês anterior
-        if mes == 1:
-            inicio = datetime(ano - 1, 12, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
-        else:
-            inicio = datetime(ano, mes - 1, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
-        # como queremos começar no dia 10, movemos 1s após as 23:59:59 do dia 09
-        # (resultado: 00:00:00 do dia 10)
-        return inicio, fim
-
-
-
-
-    def get_proxima_fatura_ref(self, hoje: datetime, fechamento_dia: int = 9):
-        """
-        Retorna (mes_fatura, ano_fatura) da fatura ABERTA atual.
-        Regras: se hoje.day > fechamento, a próxima fatura é (mês+1); caso contrário, é o mês atual.
-        """
-        mes, ano = hoje.month, hoje.year
-        if hoje.day > fechamento_dia:
-            # fatura que fechará no próximo mês
-            if mes == 12:
-                return 1, ano + 1
-            return mes + 1, ano
-        # ainda estamos antes/na data de fechamento -> a próxima fatura é do próprio mês
-        return mes, ano
-
-
-
-
-    def get_inicio_periodo_aberto(self, hoje: datetime, fechamento_dia: int = 9):
-        """
-        Retorna o datetime do início do período aberto (00:00 do dia 10) após o último fechamento.
-        """
-        if hoje.day > fechamento_dia:
-            # abertura foi dia 10 deste mês
-            return datetime(hoje.year, hoje.month, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
-        # abertura foi dia 10 do mês anterior
-        if hoje.month == 1:
-            return datetime(hoje.year - 1, 12, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
-        return datetime(hoje.year, hoje.month - 1, fechamento_dia, 23, 59, 59, 999999) + timedelta(seconds=1)
-
 
 # A função main() original do usuário, agora renomeada para run_telegram_bot()
 # e start_bot() para ser chamada pelo keep_alive.py
