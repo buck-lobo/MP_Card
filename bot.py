@@ -17,7 +17,7 @@ from firebase_admin import credentials, firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from config import (
-    BOT_TOKEN, ADMIN_ID, 
+    BOT_TOKEN, ADMIN_ID,
     FIREBASE_PROJECT_ID, FIREBASE_TYPE, FIREBASE_PRIVATE_KEY_ID, FIREBASE_PRIVATE_KEY,
     FIREBASE_CLIENT_EMAIL, FIREBASE_CLIENT_ID, FIREBASE_AUTH_URI, FIREBASE_TOKEN_URI,
     FIREBASE_AUTH_PROVIDER_X509_CERT_URL, FIREBASE_CLIENT_X509_CERT_URL, FIREBASE_UNIVERSE_DOMAIN,
@@ -42,33 +42,32 @@ _token_in_url = re.compile(r"bot\d{6,}:[A-Za-z0-9_-]{30,}")
 # 2) Token “cru” (sem o 'bot' antes) — útil se alguém logar só o valor do token
 _token_raw = re.compile(r"\d{6,}:[A-Za-z0-9_-]{30,}")
 
-def to_naive_utc(dt):
+def to_naive_utc(datetime_obj):
     """Converte Firestore Timestamp, datetime aware ou epoch -> datetime naive em UTC."""
-    if dt is None:
+    if datetime_obj is None:
         return None
-    if hasattr(dt, "to_datetime"):
-        dt = dt.to_datetime()
-    if isinstance(dt, (int, float)):
-        dt = datetime.fromtimestamp(dt, tz=timezone.utc)
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return dt
+    if hasattr(datetime_obj, "to_datetime"):
+        datetime_obj = datetime_obj.to_datetime()
+    if isinstance(datetime_obj, (int, float)):
+        datetime_obj = datetime.fromtimestamp(datetime_obj, tz=timezone.utc)
+    if datetime_obj.tzinfo is not None:
+        datetime_obj = datetime_obj.astimezone(timezone.utc).replace(tzinfo=None)
+    return datetime_obj
 
 def efetivo_inicio_fatura(mes_inicio:int, ano_inicio:int, dia_compra:int|None, fechamento_dia:int=9):
     """
     A primeira cobrança entra na fatura:
       - do mesmo mês, se a compra foi até o dia de fechamento;
       - do mês seguinte, se a compra foi após o dia de fechamento.
-    Retorna (mes0, ano0).
+    Retorna (mes_efetivo, ano_efetivo).
     """
-    m0, a0 = int(mes_inicio), int(ano_inicio)
+    mes_efetivo, ano_efetivo = int(mes_inicio), int(ano_inicio)
     if dia_compra is not None and int(dia_compra) > int(fechamento_dia):
-        m0 += 1
-        if m0 > 12:
-            m0 = 1
-            a0 += 1
-    return m0, a0
-
+        mes_efetivo += 1
+        if mes_efetivo > 12:
+            mes_efetivo = 1
+            ano_efetivo += 1
+    return mes_efetivo, ano_efetivo
 
 
 # ===================== GERENCIADOR DE FATURA =====================
@@ -81,21 +80,23 @@ class Fatura:
         self.fechamento_dia = int(fechamento_dia)
 
     def get_periodo_fatura_fechada(self, mes: int, ano: int, fechamento_dia: int | None = None):
-        d = int(fechamento_dia or self.fechamento_dia)
+        dia_fechamento = int(fechamento_dia or self.fechamento_dia)
         # início = 10 do mês anterior 00:00:00
         if mes == 1:
-            ano_prev, mes_prev = ano - 1, 12
+            ano_anterior, mes_anterior = ano - 1, 12
         else:
-            ano_prev, mes_prev = ano, mes - 1
-        inicio = datetime(ano_prev, mes_prev, d, 23, 59, 59, 999999) + timedelta(seconds=1)  # 10/mes_prev 00:00:00
-        fim = datetime(ano, mes, d, 23, 59, 59, 999999)  # 09/mes 23:59:59
+            ano_anterior, mes_anterior = ano, mes - 1
+        # O início é 1 segundo após o fechamento anterior
+        inicio = datetime(ano_anterior, mes_anterior, dia_fechamento, 23, 59, 59, 999999) + timedelta(seconds=1)
+        # O fim é exatamente no momento do fechamento atual
+        fim = datetime(ano, mes, dia_fechamento, 23, 59, 59, 999999)
         return inicio, fim
 
     def get_proxima_fatura_ref(self, hoje: datetime | None = None, fechamento_dia: int | None = None):
-        d = int(fechamento_dia or self.fechamento_dia)
+        dia_fechamento = int(fechamento_dia or self.fechamento_dia)
         if hoje is None:
             hoje = datetime.now()
-        if hoje.day > d:
+        if hoje.day > dia_fechamento:
             # próxima fatura é do mês seguinte
             if hoje.month == 12:
                 return 1, hoje.year + 1
@@ -104,16 +105,17 @@ class Fatura:
         return hoje.month, hoje.year
 
     def get_inicio_periodo_aberto(self, hoje: datetime | None = None, fechamento_dia: int | None = None):
-        d = int(fechamento_dia or self.fechamento_dia)
+        dia_fechamento = int(fechamento_dia or self.fechamento_dia)
         if hoje is None:
             hoje = datetime.now()
-        if hoje.day > d:
-            start = datetime(hoje.year, hoje.month, d, 23, 59, 59, 999999) + timedelta(seconds=1)
+        if hoje.day > dia_fechamento:
+            start = datetime(hoje.year, hoje.month, dia_fechamento, 23, 59, 59, 999999) + timedelta(seconds=1)
         else:
             if hoje.month == 1:
-                start = datetime(hoje.year - 1, 12, d, 23, 59, 59, 999999) + timedelta(seconds=1)
+                start = datetime(hoje.year - 1, 12, dia_fechamento, 23, 59, 59, 999999) + timedelta(seconds=1)
             else:
-                start = datetime(hoje.year, hoje.month - 1, d, 23, 59, 59, 999999) + timedelta(seconds=1)
+                start = datetime(hoje.year, hoje.month - 1, dia_fechamento, 23, 59, 59, 999999) + timedelta(seconds=1)
+        return start
         return start
 # ================================================================
 
@@ -159,31 +161,25 @@ ESTADO_AGUARDANDO_EXTRATO_ADMIN = 91  # número alto para não colidir
 application = None
 
 class FirebaseCartaoCreditoBot:
-    """Classe principal para gerenciar a lógica de negócios do bot de cartão de crédito."""
     def __init__(self):
         self.db = self._inicializar_firebase()
         self._inicializar_configuracoes()
         self.fatura_manager = Fatura()
-    
+
     def _inicializar_firebase(self):
-        """Inicializa a conexão com o Firebase"""
         try:
-            # Verificar se o Firebase já foi inicializado
             firebase_admin.get_app()
             logger.info("Firebase já inicializado")
         except ValueError:
-            # Firebase não foi inicializado ainda
             if (FIREBASE_TYPE and FIREBASE_PROJECT_ID and FIREBASE_PRIVATE_KEY_ID and
                 FIREBASE_PRIVATE_KEY and FIREBASE_CLIENT_EMAIL and FIREBASE_CLIENT_ID and
                 FIREBASE_AUTH_URI and FIREBASE_TOKEN_URI and FIREBASE_AUTH_PROVIDER_X509_CERT_URL and
                 FIREBASE_CLIENT_X509_CERT_URL and FIREBASE_UNIVERSE_DOMAIN):
-                
-                # Construir o dicionário de credenciais a partir das variáveis de ambiente
                 cred_dict = {
                     "type": FIREBASE_TYPE,
                     "project_id": FIREBASE_PROJECT_ID,
                     "private_key_id": FIREBASE_PRIVATE_KEY_ID,
-                    "private_key": FIREBASE_PRIVATE_KEY.replace("\\n", "\n"), # Substituir \n por quebra de linha real
+                    "private_key": FIREBASE_PRIVATE_KEY.replace("\\n", "\n"),
                     "client_email": FIREBASE_CLIENT_EMAIL,
                     "client_id": FIREBASE_CLIENT_ID,
                     "auth_uri": FIREBASE_AUTH_URI,
@@ -193,26 +189,17 @@ class FirebaseCartaoCreditoBot:
                     "universe_domain": FIREBASE_UNIVERSE_DOMAIN
                 }
                 cred = credentials.Certificate(cred_dict)
-                firebase_admin.initialize_app(cred, {
-                    'projectId': FIREBASE_PROJECT_ID,
-                })
+                firebase_admin.initialize_app(cred, {'projectId': FIREBASE_PROJECT_ID})
             else:
-                # Fallback para credenciais padrão do ambiente (para desenvolvimento local sem todas as VAs)
                 logger.warning("Variáveis de ambiente do Firebase incompletas. Tentando credenciais padrão.")
                 cred = credentials.ApplicationDefault()
-                firebase_admin.initialize_app(cred, {
-                    'projectId': FIREBASE_PROJECT_ID,
-                })
-            
+                firebase_admin.initialize_app(cred, {'projectId': FIREBASE_PROJECT_ID})
             logger.info("Firebase inicializado com sucesso")
-        
         return firestore.client()
     
     def _inicializar_configuracoes(self):
-        """Inicializa configurações padrão no Firestore se não existirem"""
         config_ref = self.db.collection(COLLECTION_CONFIGURACOES).document('global')
         config_doc = config_ref.get()
-        
         if not config_doc.exists:
             configuracoes_iniciais = {
                 "dia_vencimento": 10,
@@ -225,27 +212,24 @@ class FirebaseCartaoCreditoBot:
             logger.info("Configurações iniciais criadas no Firestore")
     
     def _decimal_para_float(self, obj):
-        """Converte Decimal para float para armazenamento no Firestore"""
         if isinstance(obj, Decimal):
             return float(obj)
         elif isinstance(obj, dict):
-            return {k: self._decimal_para_float(v) for k, v in obj.items()}
+            return {key: self._decimal_para_float(value) for key, value in obj.items()}
         elif isinstance(obj, list):
             return [self._decimal_para_float(item) for item in obj]
         return obj
-    
+
     def _float_para_decimal(self, obj):
-        """Converte float para Decimal após leitura do Firestore"""
         if isinstance(obj, (int, float)) and not isinstance(obj, bool):
             return Decimal(str(obj))
         elif isinstance(obj, dict):
-            return {k: self._float_para_decimal(v) for k, v in obj.items()}
+            return {key: self._float_para_decimal(value) for key, value in obj.items()}
         elif isinstance(obj, list):
             return [self._float_para_decimal(item) for item in obj]
         return obj
     
     def registrar_usuario(self, user_id, user_name, username=None):
-        """Registra informações do usuário no Firestore"""
         try:
             user_ref = self.db.collection(COLLECTION_USUARIOS).document(str(user_id))
             user_data = {
@@ -255,53 +239,40 @@ class FirebaseCartaoCreditoBot:
                 "ativo": True,
                 "atualizado_em": firestore.SERVER_TIMESTAMP
             }
-            
-            # Verificar se o usuário já existe
             user_doc = user_ref.get()
             if user_doc.exists:
-                # Atualizar apenas campos específicos
-                user_ref.update({
-                    "name": user_name,
-                    "username": username,
-                    "last_seen": firestore.SERVER_TIMESTAMP,
-                    "atualizado_em": firestore.SERVER_TIMESTAMP
-                })
+                user_ref.update(user_data)
             else:
-                # Criar novo usuário
                 user_data["criado_em"] = firestore.SERVER_TIMESTAMP
                 user_ref.set(user_data)
-            
             logger.info(f"Usuário {user_id} registrado/atualizado no Firestore")
         except Exception as e:
             logger.error(f"Erro ao registrar usuário {user_id}: {e}")
     
     def adicionar_gasto(self, user_id, descricao, valor_total, parcelas=1):
-        """Adiciona um novo gasto no Firestore"""
         try:
             gasto_id = f"{user_id}_{int(time.time())}"
-            valor_total = Decimal(str(valor_total))
-            valor_parcela = valor_total / parcelas
-            
+            valor_total_decimal = Decimal(str(valor_total))
+            valor_parcela_decimal = valor_total_decimal / parcelas
+            agora = datetime.now()
+
             gasto_data = {
                 "id": gasto_id,
                 "user_id": str(user_id),
                 "descricao": descricao,
-                "valor_total": float(valor_total),
-                "valor_parcela": float(valor_parcela),
+                "valor_total": float(valor_total_decimal),
+                "valor_parcela": float(valor_parcela_decimal),
                 "parcelas_total": parcelas,
                 "parcelas_pagas": 0,
-                "data_compra": datetime.now(),
+                "data_compra": agora,
                 "ativo": True,
-                "mes_inicio": datetime.now().month,
-                "ano_inicio": datetime.now().year,
+                "mes_inicio": agora.month,
+                "ano_inicio": agora.year,
                 "criado_em": firestore.SERVER_TIMESTAMP,
                 "atualizado_em": firestore.SERVER_TIMESTAMP
             }
-            
-            # Adicionar ao Firestore
             gasto_ref = self.db.collection(COLLECTION_GASTOS).document(gasto_id)
             gasto_ref.set(gasto_data)
-            
             logger.info(f"Gasto {gasto_id} adicionado ao Firestore")
             return gasto_id
         except Exception as e:
@@ -309,27 +280,24 @@ class FirebaseCartaoCreditoBot:
             raise
     
     def adicionar_pagamento(self, user_id, valor, descricao=""):
-        """Adiciona um pagamento no Firestore"""
         try:
             pagamento_id = f"pag_{user_id}_{int(time.time())}"
-            valor = Decimal(str(valor))
-            
+            valor_decimal = Decimal(str(valor))
+            agora = datetime.now()
+
             pagamento_data = {
                 "id": pagamento_id,
                 "user_id": str(user_id),
-                "valor": float(valor),
+                "valor": float(valor_decimal),
                 "descricao": descricao,
-                "data_pagamento": datetime.now(),
-                "mes": datetime.now().month,
-                "ano": datetime.now().year,
+                "data_pagamento": agora,
+                "mes": agora.month,
+                "ano": agora.year,
                 "criado_em": firestore.SERVER_TIMESTAMP,
                 "atualizado_em": firestore.SERVER_TIMESTAMP
             }
-            
-            # Adicionar ao Firestore
             pagamento_ref = self.db.collection(COLLECTION_PAGAMENTOS).document(pagamento_id)
             pagamento_ref.set(pagamento_data)
-            
             logger.info(f"Pagamento {pagamento_id} adicionado ao Firestore")
             return pagamento_id
         except Exception as e:
@@ -362,9 +330,24 @@ class FirebaseCartaoCreditoBot:
                 gasto = self._float_para_decimal(gasto)
                 
                 # Verificar se o gasto tem parcela no mês solicitado
-                if self._gasto_tem_parcela_no_mes(gasto, mes, ano):
-                    total_fatura += gasto["valor_parcela"]
-                    gastos_mes.append(gasto)
+                def _gasto_tem_parcela_no_mes(self, gasto, mes, ano):
+                    """
+                    True se há parcela deste gasto na fatura (mes/ano).
+                    Respeita o fechamento no dia 09: compras do dia 10..31
+                    entram na fatura do mês seguinte.
+                    """
+                    dtc = to_naive_utc(gasto.get("data_compra"))
+                    dia = dtc.day if isinstance(dtc, datetime) else None
+
+                    # mês/ano "efetivos" da 1ª parcela (ajustados pelo fechamento)
+                    m0, a0 = efetivo_inicio_fatura(
+                        gasto["mes_inicio"], gasto["ano_inicio"], dia, self.fatura_manager.fechamento_dia
+                    )
+
+                    idx = (int(ano) * 12 + int(mes)) - (a0 * 12 + m0)  # 0 = primeira parcela
+                    total = int(gasto.get("parcelas_total", 1))
+                    return 0 <= idx < total
+
             
             return total_fatura, gastos_mes
         except Exception as e:
@@ -372,124 +355,88 @@ class FirebaseCartaoCreditoBot:
             return Decimal('0'), []
     
     def _gasto_tem_parcela_no_mes(self, gasto, mes, ano):
-        """Verifica se um gasto tem parcela a ser paga no mês especificado"""
-        mes_inicio = gasto["mes_inicio"]
-        ano_inicio = gasto["ano_inicio"]
-        parcelas_pagas = gasto["parcelas_pagas"]
-        parcelas_total = gasto["parcelas_total"]
-        
-        # Calcular quantos meses se passaram desde o início
-        meses_passados = (ano - ano_inicio) * 12 + (mes - mes_inicio)
-        
-        # Verificar se ainda há parcelas a pagar e se é o mês correto
-        return (meses_passados >= 0 and 
-                meses_passados < parcelas_total and 
-                meses_passados >= parcelas_pagas)
+        """
+        True se há parcela deste gasto na fatura (mes/ano).
+        Respeita o fechamento no dia 09: compras do dia 10..31
+        entram na fatura do mês seguinte.
+        """
+        dtc = to_naive_utc(gasto.get("data_compra"))
+        dia = dtc.day if isinstance(dtc, datetime) else None
+
+        # mês/ano "efetivos" da 1ª parcela (ajustados pelo fechamento)
+        m0, a0 = efetivo_inicio_fatura(
+            gasto["mes_inicio"], gasto["ano_inicio"], dia, self.fatura_manager.fechamento_dia
+        )
+
+        idx = (int(ano) * 12 + int(mes)) - (a0 * 12 + m0)  # 0 = primeira parcela
+        total = int(gasto.get("parcelas_total", 1))
+        return 0 <= idx < total
+
     
-    def calcular_saldo_usuario(self, user_id):
-        """Calcula o saldo atual do usuário (gastos - pagamentos)"""
+    def calcular_saldo_usuario(self, user_id: int):
         user_id_str = str(user_id)
-        
         try:
-            # Calcular total de gastos até agora
-            total_gastos = Decimal('0')
-            mes_atual = datetime.now().month
-            ano_atual = datetime.now().year
-            
-            # Buscar gastos do usuário
+            total_gastos_devidos = Decimal('0')
+            agora = datetime.now()
+
             gastos_query = self.db.collection(COLLECTION_GASTOS).where(
                 filter=FieldFilter("user_id", "==", user_id_str)
             ).where(
                 filter=FieldFilter("ativo", "==", True)
             )
-            
-            gastos_docs = gastos_query.stream()
-            
-            for doc in gastos_docs:
-                gasto = doc.to_dict()
-                gasto = self._float_para_decimal(gasto)
-                
-                # Somar todas as parcelas que já venceram
-                parcelas_vencidas = self._calcular_parcelas_vencidas(gasto, mes_atual, ano_atual)
-                total_gastos += gasto["valor_parcela"] * parcelas_vencidas
-            
-            # Calcular total de pagamentos
+
+            for gasto_doc in gastos_query.stream():
+                gasto_dict = self._float_para_decimal(gasto_doc.to_dict())
+                # ✅ CORREÇÃO: Chama a função corrigida para um saldo preciso
+                parcelas_devidas = self._calcular_parcelas_vencidas(gasto_dict, agora.month, agora.year)
+                total_gastos_devidos += gasto_dict["valor_parcela"] * parcelas_devidas
+
             total_pagamentos = Decimal('0')
             pagamentos_query = self.db.collection(COLLECTION_PAGAMENTOS).where(
                 filter=FieldFilter("user_id", "==", user_id_str)
             )
-            
-            pagamentos_docs = pagamentos_query.stream()
-            
-            for doc in pagamentos_docs:
-                pagamento = doc.to_dict()
-                pagamento = self._float_para_decimal(pagamento)
-                total_pagamentos += pagamento["valor"]
-            
-            return total_gastos - total_pagamentos
+
+            for pagamento_doc in pagamentos_query.stream():
+                pagamento_dict = self._float_para_decimal(pagamento_doc.to_dict())
+                total_pagamentos += pagamento_dict["valor"]
+
+            return (total_gastos_devidos - total_pagamentos).quantize(Decimal("0.01"))
         except Exception as e:
             logger.error(f"Erro ao calcular saldo do usuário {user_id}: {e}")
             return Decimal('0')
     
-    def _calcular_parcelas_vencidas(self, gasto, mes_atual, ano_atual):
-        """Calcula quantas parcelas de um gasto já venceram"""
-        mes_inicio = gasto["mes_inicio"]
-        ano_inicio = gasto["ano_inicio"]
-        parcelas_total = gasto["parcelas_total"]
-        
-        # Calcular quantos meses se passaram desde o início
-        meses_passados = (ano_atual - ano_inicio) * 12 + (mes_atual - mes_inicio) + 1
-        
-        # Retornar o menor entre meses passados e total de parcelas
-        return min(max(0, meses_passados), parcelas_total)
-    
-    def obter_gastos_usuario(self, user_id):
-        """Obtém todos os gastos de um usuário do Firestore"""
-        user_id_str = str(user_id)
-        gastos_usuario = []
-        
-        try:
-            gastos_query = self.db.collection(COLLECTION_GASTOS).where(
-                filter=FieldFilter("user_id", "==", user_id_str)
-            ).where(
-                filter=FieldFilter("ativo", "==", True)
-            ).order_by("data_compra", direction=firestore.Query.DESCENDING)
-            
-            gastos_docs = gastos_query.stream()
-            
-            for doc in gastos_docs:
-                gasto = doc.to_dict()
-                gasto = self._float_para_decimal(gasto)
-                # Converter datetime para string ISO se necessário
-                if isinstance(gasto.get("data_compra"), datetime):
-                    gasto["data_compra"] = gasto["data_compra"].isoformat()
-                gastos_usuario.append(gasto)
-            
-            return gastos_usuario
-        except Exception as e:
-            logger.error(f"Erro ao obter gastos do usuário {user_id}: {e}")
-            return []
+    # ✅ CORREÇÃO: Respeita o dia de fechamento para um cálculo de saldo consistente.
+    def _calcular_parcelas_vencidas(self, gasto: dict, mes_referencia: int, ano_referencia: int):
+        """
+        Calcula quantas parcelas de um gasto já deveriam ter sido cobradas até a fatura de (mes_referencia/ano_referencia).
+        """
+        datetime_compra = to_naive_utc(gasto.get("data_compra"))
+        dia_compra = datetime_compra.day if isinstance(datetime_compra, datetime) else None
+
+        # Usa a mesma lógica dos extratos para saber o mês/ano de início efetivo da cobrança
+        mes_efetivo_inicio, ano_efetivo_inicio = efetivo_inicio_fatura(
+            gasto["mes_inicio"], gasto["ano_inicio"], dia_compra, self.fatura_manager.fechamento_dia
+        )
+
+        # Calcula quantos meses se passaram desde a primeira cobrança até a fatura de referência
+        meses_passados = (ano_referencia - ano_efetivo_inicio) * 12 + (mes_referencia - mes_efetivo_inicio) + 1
+
+        return min(max(0, meses_passados), int(gasto["parcelas_total"]))
     
     def obter_pagamentos_usuario(self, user_id):
         """Obtém todos os pagamentos de um usuário do Firestore"""
         user_id_str = str(user_id)
         pagamentos_usuario = []
-        
         try:
             pagamentos_query = self.db.collection(COLLECTION_PAGAMENTOS).where(
                 filter=FieldFilter("user_id", "==", user_id_str)
             ).order_by("data_pagamento", direction=firestore.Query.DESCENDING)
             
-            pagamentos_docs = pagamentos_query.stream()
-            
-            for doc in pagamentos_docs:
-                pagamento = doc.to_dict()
-                pagamento = self._float_para_decimal(pagamento)
-                # Converter datetime para string ISO se necessário
+            for doc in pagamentos_query.stream():
+                pagamento = self._float_para_decimal(doc.to_dict())
                 if isinstance(pagamento.get("data_pagamento"), datetime):
                     pagamento["data_pagamento"] = pagamento["data_pagamento"].isoformat()
                 pagamentos_usuario.append(pagamento)
-            
             return pagamentos_usuario
         except Exception as e:
             logger.error(f"Erro ao obter pagamentos do usuário {user_id}: {e}")
@@ -500,10 +447,7 @@ class FirebaseCartaoCreditoBot:
         try:
             user_ref = self.db.collection(COLLECTION_USUARIOS).document(str(user_id))
             user_doc = user_ref.get()
-            
-            if user_doc.exists:
-                return user_doc.to_dict()
-            return None
+            return user_doc.to_dict() if user_doc.exists else None
         except Exception as e:
             logger.error(f"Erro ao obter info do usuário {user_id}: {e}")
             return None
@@ -511,25 +455,17 @@ class FirebaseCartaoCreditoBot:
     def listar_todos_usuarios(self):
         """Lista todos os usuários ativos do Firestore (apenas para admin)"""
         usuarios = []
-        
         try:
-            usuarios_query = self.db.collection(COLLECTION_USUARIOS).where(
-                filter=FieldFilter("ativo", "==", True)
-            )
-            
-            usuarios_docs = usuarios_query.stream()
-            
+            usuarios_docs = self.db.collection(COLLECTION_USUARIOS).where(filter=FieldFilter("ativo", "==", True)).stream()
             for doc in usuarios_docs:
                 user_data = doc.to_dict()
                 user_id = doc.id
-                
                 usuarios.append({
                     "id": user_id,
                     "name": user_data.get("name", ""),
                     "username": user_data.get("username"),
                     "saldo": self.calcular_saldo_usuario(int(user_id))
                 })
-            
             return usuarios
         except Exception as e:
             logger.error(f"Erro ao listar usuários: {e}")
@@ -545,56 +481,67 @@ class FirebaseCartaoCreditoBot:
         }
         
         try:
-            # Calcular totais de gastos
-            gastos_query = self.db.collection(COLLECTION_GASTOS).where(
-                filter=FieldFilter("ativo", "==", True)
-            )
-            gastos_docs = gastos_query.stream()
-            
+            agora = datetime.now()
+            gastos_docs = self.db.collection(COLLECTION_GASTOS).where(filter=FieldFilter("ativo", "==", True)).stream()
             for doc in gastos_docs:
-                gasto = doc.to_dict()
-                gasto = self._float_para_decimal(gasto)
-                
-                parcelas_vencidas = self._calcular_parcelas_vencidas(
-                    gasto, datetime.now().month, datetime.now().year
-                )
+                gasto = self._float_para_decimal(doc.to_dict())
+                parcelas_vencidas = self._calcular_parcelas_vencidas(gasto, agora.month, agora.year)
                 relatorio["total_gastos"] += gasto["valor_parcela"] * parcelas_vencidas
-            
-            # Calcular totais de pagamentos
-            pagamentos_query = self.db.collection(COLLECTION_PAGAMENTOS)
-            pagamentos_docs = pagamentos_query.stream()
-            
+
+            pagamentos_docs = self.db.collection(COLLECTION_PAGAMENTOS).stream()
             for doc in pagamentos_docs:
-                pagamento = doc.to_dict()
-                pagamento = self._float_para_decimal(pagamento)
+                pagamento = self._float_para_decimal(doc.to_dict())
                 relatorio["total_pagamentos"] += pagamento["valor"]
-            
+
             relatorio["saldo_geral"] = relatorio["total_gastos"] - relatorio["total_pagamentos"]
-            
             return relatorio
         except Exception as e:
             logger.error(f"Erro ao obter relatório completo: {e}")
             return relatorio
         
      # ===================== EXTRATO (DATA LAYER) =====================       
-    def _iterar_parcelas_do_mes(self, gasto: dict, mes: int, ano: int):
+    # ✅ CORREÇÃO: Função renomeada e lógica simplificada para processar um único gasto.
+    def _gerar_item_de_extrato_se_pertence_ao_mes(self, gasto: dict, mes_fatura: int, ano_fatura: int):
         """
-        Gera 0..1 itens de parcela para ESTE (mes,ano) com campos prontos para o extrato.
-        Um gasto só gera uma parcela por mês, se devida.
+        Verifica se um gasto tem parcela na fatura (mes/ano) e, se tiver,
+        retorna o dicionário do item para o extrato.
         """
-        if self._gasto_tem_parcela_no_mes(gasto, mes, ano):
-            yield {
-                "tipo": "Parcela",
-                "descricao": gasto.get("descricao", "").strip() or "(sem descrição)",
-                "valor": self._float_para_decimal(gasto.get("valor_parcela", 0.0)),
-                "data": datetime(int(ano), int(mes), 1),  # data simbólica: 1º do mês
+        if not gasto.get("ativo", True):
+            return None
+
+        datetime_compra = to_naive_utc(gasto.get("data_compra"))
+        mes_inicio_compra = int(gasto.get("mes_inicio") or (datetime_compra.month if datetime_compra else mes_fatura))
+        ano_inicio_compra = int(gasto.get("ano_inicio") or (datetime_compra.year if datetime_compra else ano_fatura))
+        dia_compra = datetime_compra.day if isinstance(datetime_compra, datetime) else self.fatura_manager.fechamento_dia + 1
+        total_parcelas = int(gasto.get("parcelas_total") or 1)
+
+        # Ajusta o mês/ano de início para a "primeira fatura"
+        mes_efetivo_inicio, ano_efetivo_inicio = efetivo_inicio_fatura(
+            mes_inicio_compra, ano_inicio_compra, dia_compra, self.fatura_manager.fechamento_dia
+        )
+
+        # Calcula qual parcela (indice) cai NA fatura (mes, ano)
+        numero_parcela_na_fatura = (int(ano_fatura) * 12 + int(mes_fatura)) - (ano_efetivo_inicio * 12 + mes_efetivo_inicio) + 1
+
+        if 1 <= numero_parcela_na_fatura <= total_parcelas:
+            valor_item = Decimal(str(
+                gasto.get("valor_parcela") if total_parcelas > 1 else gasto.get("valor_total")
+            ))
+            return {
+                "tipo": "Parcela" if total_parcelas > 1 else "Gasto",
+                "descricao": gasto.get("descricao", ""),
+                "valor": valor_item,
+                "data": datetime_compra or datetime(int(ano_fatura), int(mes_fatura), 1),
                 "meta": {
-                    "gasto_id": gasto.get("id") or gasto.get("doc_id"),
-                    "parcelas_total": gasto.get("parcelas_total"),
-                    "mes_inicio": gasto.get("mes_inicio"),
-                    "ano_inicio": gasto.get("ano_inicio"),
-                }
+                    "gasto_id": gasto.get("id"),
+                    "parcelas_total": total_parcelas,
+                    "parcela_num": numero_parcela_na_fatura,
+                    "mes_inicio": mes_inicio_compra,
+                    "ano_inicio": ano_inicio_compra,
+                    "dia_compra": dia_compra,
+                },
             }
+        return None
     
     def obter_extrato_usuario(self, user_id, mes: int, ano: int):
         """
@@ -654,237 +601,152 @@ class FirebaseCartaoCreditoBot:
             "saldo_mes": saldo_mes
         }
     
-    def buscar_usuario_por_nome_ou_username(self, termo: str):
+    def buscar_usuario_por_nome_ou_username(self, termo_busca: str):
         """
         Procura um usuário por username (com ou sem @) ou por 'name' contendo termo (case-insensitive).
         Retorna dict do usuário ou None.
         """
-        termo = (termo or "").strip()
-        if termo.startswith("@"):
-            termo = termo[1:]
+        termo_busca = (termo_busca or "").strip()
+        if termo_busca.startswith("@"):
+            termo_busca = termo_busca[1:]
 
         # 1) Tenta username exato
-        q1 = self.db.collection(COLLECTION_USUARIOS).where("username", "==", termo).limit(1).stream()
-        for d in q1:
-            u = d.to_dict() or {}
-            u["user_id"] = d.id
-            return u
+        query_username = self.db.collection(COLLECTION_USUARIOS).where("username", "==", termo_busca).limit(1).stream()
+        for doc in query_username:
+            usuario = doc.to_dict() or {}
+            usuario["user_id"] = doc.id
+            return usuario
 
         # 2) Tenta nome contendo termo (ingênuo; Firestore não tem contains nativo, então guardamos variantes)
         # fallback: buscar todos e filtrar em memória (se sua base for pequena)
         try:
-            todos = list(self.db.collection(COLLECTION_USUARIOS).stream())
-            termo_low = termo.lower()
-            for d in todos:
-                u = d.to_dict() or {}
-                nome = (u.get("name") or "").lower()
-                if termo_low in nome:
-                    u["user_id"] = d.id
-                    return u
-        except Exception:
-            pass
+            todos_usuarios = self.db.collection(COLLECTION_USUARIOS).stream()
+            termo_busca_lower = termo_busca.lower()
+            for doc in todos_usuarios:
+                usuario = doc.to_dict() or {}
+                nome = (usuario.get("name") or "").lower()
+                if termo_busca_lower in nome:
+                    usuario["user_id"] = doc.id
+                    return usuario
+        except Exception as e:
+            logger.error(f"Erro ao buscar usuário por nome: {e}")
 
         return None
     
-    def obter_extrato_consumo_usuario(self, user_id, mes:int, ano:int, fechamento_dia:int=9):
+    # ✅ CORREÇÃO: Lógica de extrato de fatura fechada refatorada para ser mais robusta.
+    def obter_extrato_consumo_usuario(self, user_id: int, mes: int, ano: int, fechamento_dia: int = 9):
         """
         Extrato de uma FATURA FECHADA (consumo de 10/mes-1 a 09/mes).
         Emite PARCELAS (n/N) que caem nessa fatura; à vista => n=1/N=1
         Também inclui pagamentos dentro do mesmo período.
         """
         user_id_str = str(user_id)
-        from decimal import Decimal
-        inicio, fim = self.fatura_manager.get_periodo_fatura_fechada(mes, ano, fechamento_dia)
+        inicio_periodo, fim_periodo = self.fatura_manager.get_periodo_fatura_fechada(mes, ano, fechamento_dia)
+        itens_extrato = []
 
-
-        itens = []
-
-        # --- VARRE compras e transforma em "Parcela" se o mês consultado tem parcela ---
         gastos_ref = (
             self.db.collection(COLLECTION_GASTOS)
             .where("user_id", "==", user_id_str)
             .where("ativo", "==", True)
-            # filtro por data_compra ajuda index, mas quem define inclusão é 'k' abaixo
-            .where("data_compra", "<=", fim)
+            .where("data_compra", "<=", fim_periodo)
         )
-        for doc in gastos_ref.stream():
-            g = doc.to_dict() or {}
-            g = self._float_para_decimal(g)
-            g["doc_id"] = doc.id
+        for gasto_doc in gastos_ref.stream():
+            gasto = self._float_para_decimal(gasto_doc.to_dict() or {})
+            item_extrato = self._gerar_item_de_extrato_se_pertence_ao_mes(gasto, mes, ano)
+            if item_extrato:
+                itens_extrato.append(item_extrato)
 
-            mi, ai = int(g.get("mes_inicio")), int(g.get("ano_inicio"))
-            total = int(g.get("parcelas_total", 1))
-            # dia real da compra (para decidir se a 1ª cobrança foi neste mês ou no próximo)
-            dt_compra = to_naive_utc(g.get("data_compra"))
-            dia_compra = dt_compra.day if isinstance(dt_compra, datetime) else None
-
-            # mês/ano da 1ª cobrança (ajusta se compra foi após o dia de fechamento)
-            mi0, ai0 = efetivo_inicio_fatura(mi, ai, dia_compra, fechamento_dia)
-            # parcela k que cai na fatura fechada consultada (1-based)
-            k = (ano * 12 + mes) - (ai0 * 12 + mi0) + 1
-            if 1 <= k <= total:
-                # data exibida: k==1 usa a data real; senão, 01/mes da fatura consultada
-                dt = dt_compra or datetime(ano, mes, 1)
-                data_item = dt if k == 1 else datetime(ano, mes, 1)
-                itens.append({
-                    "tipo": "Parcela",
-                    "descricao": (g.get("descricao") or "").strip() or "(sem descrição)",
-                    "valor": self._float_para_decimal(g.get("valor_parcela", g.get("valor_total", 0.0))),
-                    "data": data_item,
-                    "meta": {
-                        "gasto_id": g.get("id") or doc.id,
-                        "parcelas_total": total,
-                        "mes_inicio": mi, "ano_inicio": ai,
-                        "dia_compra": dia_compra,
-                    }
-                })
-
-        # --- PAGAMENTOS dentro do período fechado ---
         pagamentos_ref = (
             self.db.collection(COLLECTION_PAGAMENTOS)
             .where("user_id", "==", user_id_str)
-            .where("data_pagamento", ">=", inicio)
-            .where("data_pagamento", "<=", fim)
+            .where("data_pagamento", ">=", inicio_periodo)
+            .where("data_pagamento", "<=", fim_periodo)
         )
-        for doc in pagamentos_ref.stream():
-            p = doc.to_dict() or {}
-            valor = self._float_para_decimal(p.get("valor", 0.0))
-            data_pg_raw = p.get("data_pagamento")
-            data_pg = to_naive_utc(data_pg_raw) or inicio
-            meta = {
-                "gasto_id": g.get("id") or doc.id,
-                "parcelas_total": total,
-                "mes_inicio": mi,
-                "ano_inicio": ai,
-                "dia_compra": (dt.day if isinstance(dt, datetime) else 1),  # <-- ADICIONE ISTO
-            }
-            itens.append({
+        for pagamento_doc in pagamentos_ref.stream():
+            pagamento = self._float_para_decimal(pagamento_doc.to_dict() or {})
+            valor = pagamento.get("valor", Decimal("0.0"))
+            data_pagamento = to_naive_utc(pagamento.get("data_pagamento")) or inicio_periodo
+
+            itens_extrato.append({
                 "tipo": "Pagamento",
-                "descricao": (p.get("descricao") or "Pagamento").strip(),
+                "descricao": (pagamento.get("descricao") or "Pagamento").strip(),
                 "valor": valor,
-                "data": data_pg,
-                "meta": meta,
+                "data": data_pagamento,
+                "meta": {"pagamento_id": pagamento_doc.id}
             })
 
-        itens.sort(key=lambda x: x["data"])
+        itens_extrato.sort(key=lambda item: item["data"])
 
-        total_parcelas = sum((i["valor"] for i in itens if i["tipo"] == "Parcela"), Decimal("0.00"))
-        total_pag = sum((i["valor"] for i in itens if i["tipo"] == "Pagamento"), Decimal("0.00"))
-        saldo = (total_parcelas - total_pag).quantize(Decimal("0.01"))
+        total_parcelas = sum((item["valor"] for item in itens_extrato if item["tipo"] in ["Parcela", "Gasto"]), Decimal("0.00"))
+        total_pagamentos = sum((item["valor"] for item in itens_extrato if item["tipo"] == "Pagamento"), Decimal("0.00"))
+        saldo_mes = (total_parcelas - total_pagamentos).quantize(Decimal("0.01"))
 
         totais = {
-            "parcelas_mes": total_parcelas.quantize(Decimal("0.01")),
-            "pagamentos_mes": total_pag.quantize(Decimal("0.01")),
-            "saldo_mes": saldo,
+            "parcelas_mes": total_parcelas,
+            "pagamentos_mes": total_pagamentos,
+            "saldo_mes": saldo_mes,
             "mes_fatura": mes,
             "ano_fatura": ano,
         }
-        return itens, totais
+        return itens_extrato, totais
 
-    
+
+    # ✅ CORREÇÃO: Lógica de extrato de fatura aberta refatorada e corrigida.    
     def obter_extrato_fatura_aberta(self, user_id, hoje: datetime | None = None, fechamento_dia: int = 9):
-        """
-        Retorna os itens que irão para a PRÓXIMA fatura (ainda aberta) + pagamentos do período aberto.
-        - Parcela (n/N) de todos os gastos que tenham parcela na próxima fatura
-        - Para compras recentes (>= 10/..), a 1ª parcela (à vista ou n=1) entra na próxima fatura
-        - Pagamentos entre o início do período aberto e 'hoje'
-        """
         user_id_str = str(user_id)
         if hoje is None:
             hoje = datetime.now()
-        hoje = to_naive_utc(hoje)
+        hoje_utc = to_naive_utc(hoje)
 
-        # Referência da próxima fatura (onde as parcelas entrarão)
-        mes_fat, ano_fat = self.fatura_manager.get_proxima_fatura_ref(hoje, fechamento_dia)
-        
+        mes_proxima_fatura, ano_proxima_fatura = self.fatura_manager.get_proxima_fatura_ref(hoje_utc, fechamento_dia)
+        itens_extrato = []
 
-        itens = []
-
-        # --- Todas as PARCELAS que caem na PRÓXIMA fatura ---
         gastos_ref = self.db.collection(COLLECTION_GASTOS)\
             .where("user_id", "==", user_id_str)\
             .where("ativo", "==", True)
 
-        for doc in gastos_ref.stream():
-            g = doc.to_dict() or {}
-            g = self._float_para_decimal(g)
-            g["doc_id"] = doc.id
+        for gasto_doc in gastos_ref.stream():
+            gasto = self._float_para_decimal(gasto_doc.to_dict() or {})
+            item = self._gerar_item_de_extrato_se_pertence_ao_mes(gasto, mes_proxima_fatura, ano_proxima_fatura)
+            if item:
+                itens_extrato.append(item)
 
-            # Qual parcela cai na próxima fatura?
-            mi, ai = int(g.get("mes_inicio")), int(g.get("ano_inicio"))
-            k = (ano_fat * 12 + mes_fat) - (ai * 12 + mi) + 1  # 1-based
-            parcelas_total = int(g.get("parcelas_total", 1))
-            if 1 <= k <= parcelas_total:
-                # Data para exibir:
-                # - se k == 1 -> usar data_compra real
-                # - senão -> data simbólica 1º/mes_fat
-                dt_raw = g.get("data_compra")
-                dt = to_naive_utc(dt_raw) or datetime(ano_fat, mes_fat, 1)
-                # if hasattr(dt, "to_datetime"):
-                #     dt = dt.to_datetime()
-                # if not isinstance(dt, datetime):
-                #     dt = datetime(ano_fat, mes_fat, 1)
-
-                data_item = dt if k == 1 else datetime(ano_fat, mes_fat, 1)
-
-                itens.append({
-                    "tipo": "Parcela",
-                    "descricao": (g.get("descricao") or "").strip() or "(sem descrição)",
-                    "valor": self._float_para_decimal(g.get("valor_parcela", 0.0)),
-                    "data": data_item,
-                    "meta": {
-                        "gasto_id": g.get("id") or doc.id,
-                        "parcelas_total": parcelas_total,
-                        "mes_inicio": mi,
-                        "ano_inicio": ai,
-                    }
-                })
-
-        # --- PAGAMENTOS no PERÍODO ABERTO ---
-        inicio_aberto = self.fatura_manager.get_inicio_periodo_aberto(hoje, fechamento_dia)
-
+        inicio_periodo_aberto = self.fatura_manager.get_inicio_periodo_aberto(hoje_utc, fechamento_dia)
         pagamentos_ref = self.db.collection(COLLECTION_PAGAMENTOS)\
             .where("user_id", "==", user_id_str)\
-            .where("data_pagamento", ">=", inicio_aberto)\
-            .where("data_pagamento", "<=", hoje)
+            .where("data_pagamento", ">=", inicio_periodo_aberto)\
+            .where("data_pagamento", "<=", hoje_utc)
 
-        for doc in pagamentos_ref.stream():
-            p = doc.to_dict() or {}
-            valor = self._float_para_decimal(p.get("valor", 0.0))
-            data_pg_raw = p.get("data_pagamento")
-            data_pg = to_naive_utc(data_pg_raw) or inicio_aberto
-            # if hasattr(data_pg, "to_datetime"):
-            #     data_pg = data_pg.to_datetime()
-            # if not isinstance(data_pg, datetime):
-            #     data_pg = inicio_aberto
+        for pagamento_doc in pagamentos_ref.stream():
+            pagamento = self._float_para_decimal(pagamento_doc.to_dict() or {})
+            valor = pagamento.get("valor", Decimal("0.0"))
+            data_pagamento = to_naive_utc(pagamento.get("data_pagamento")) or inicio_periodo_aberto
 
-            itens.append({
+            itens_extrato.append({
                 "tipo": "Pagamento",
-                "descricao": (p.get("descricao") or "Pagamento").strip(),
+                "descricao": (pagamento.get("descricao") or "Pagamento").strip(),
                 "valor": valor,
-                "data": data_pg,
-                "meta": {"pagamento_id": doc.id}
+                "data": data_pagamento,
+                "meta": {"pagamento_id": pagamento_doc.id}
             })
 
-        # Ordena (1ª parcela com data real; demais com 01/mes_fat)
-        itens.sort(key=lambda x: x["data"])
+        itens_extrato.sort(key=lambda item: item["data"])
 
-        total_parcelas = sum((i["valor"] for i in itens if i["tipo"] == "Parcela"), Decimal("0.00"))
-        total_pag = sum((i["valor"] for i in itens if i["tipo"] == "Pagamento"), Decimal("0.00"))
-        saldo = (total_parcelas - total_pag).quantize(Decimal("0.01"))
+        total_parcelas = sum((item["valor"] for item in itens_extrato if item["tipo"] in ["Parcela", "Gasto"]), Decimal("0.00"))
+        total_pagamentos = sum((item["valor"] for item in itens_extrato if item["tipo"] == "Pagamento"), Decimal("0.00"))
+        saldo = (total_parcelas - total_pagamentos).quantize(Decimal("0.01"))
 
         totais = {
-            "parcelas_mes": total_parcelas.quantize(Decimal("0.01")),
-            "pagamentos_mes": total_pag.quantize(Decimal("0.01")),
+            "parcelas_mes": total_parcelas,
+            "pagamentos_mes": total_pagamentos,
             "saldo_mes": saldo,
-            # passaremos mes/ano da fatura para formatação do n/N
-            "mes_fatura": mes_fat,
-            "ano_fatura": ano_fat,
+            "mes_fatura": mes_proxima_fatura,
+            "ano_fatura": ano_proxima_fatura,
         }
-        return itens, totais
+        return itens_extrato, totais
 
 
-
+# ===================== DEMAIS FUNÇÕES DO BOT (SEM MUDANÇAS SIGNIFICATIVAS, APENAS CHAMADAS AJUSTADAS) =====================
 # Instância global do bot
 cartao_bot = FirebaseCartaoCreditoBot()
 
@@ -950,16 +812,10 @@ async def configurar_menu_comandos(application):
     await application.bot.set_my_commands(comandos)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /start - Apresenta o bot com menu interativo"""
     user = update.effective_user
-    user_id = user.id
-    
-    # Limpar estado do usuário
     context.user_data.clear()
     context.user_data['estado'] = ESTADO_NORMAL
-    
-    # Registrar usuário
-    cartao_bot.registrar_usuario(user_id, user.first_name, user.username)
+    cartao_bot.registrar_usuario(user.id, user.first_name, user.username)
     
     welcome_message = f"""
 💳 Olá {user.first_name}! Bem-vindo ao Bot de Controle de Cartão de Crédito!
@@ -986,34 +842,21 @@ Use o menu abaixo para navegar:
 
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /menu - Mostra o menu interativo"""
-    user_id = update.effective_user.id
-    
-    # Limpar estado do usuário
+    user = update.effective_user
     context.user_data.clear()
     context.user_data['estado'] = ESTADO_NORMAL
-    
-    # Registrar usuário
-    cartao_bot.registrar_usuario(update.effective_user.id, update.effective_user.first_name, update.effective_user.username)
-    
-    keyboard = criar_menu_principal(user_id)
-    
-    await update.message.reply_text(
-        "💳 <b>Menu Principal</b>\n\nEscolha uma opção abaixo:",
-        reply_markup=keyboard,
-        parse_mode="HTML"
-    )
+    cartao_bot.registrar_usuario(user.id, user.first_name, user.username)
+    keyboard = criar_menu_principal(user.id)
+    await update.message.reply_text("💳 <b>Menu Principal</b>\n\nEscolha uma opção abaixo:", reply_markup=keyboard, parse_mode="HTML")
+
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manipula os callbacks dos botões inline"""
     query = update.callback_query
     user_id = query.from_user.id
     user_name = query.from_user.first_name
-    data = query.data
-    
-    await query.answer()  # Confirma o clique do botão
-    
-    # Registrar usuário
+    data = query.data    
+    await query.answer()   
     cartao_bot.registrar_usuario(user_id, user_name, query.from_user.username)
     
     if data == "menu_principal":
@@ -1819,112 +1662,79 @@ async def extrato(update, context):
 
 # ===================== EXTRATO (HELPERS DE FORMATAÇÃO) =====================
 
-MAX_TG = 3900  # margem de segurança (limite real ~4096)
+MAX_TG = 3900
 
 async def reply_long(update_or_query, texto, reply_markup=None, parse_mode="HTML"):
-    """
-    Envia 'texto' em N mensagens se necessário. 
-    Se for callback_query, usa 'edit_message_text' no primeiro envio e 'message.reply_text' nos demais.
-    """
     partes = []
-    atual = []
-    tamanho = 0
+    parte_atual = []
+    tamanho_atual = 0
     for linha in texto.split("\n"):
-        add = (linha + "\n")
-        if tamanho + len(add) > MAX_TG:
-            partes.append("".join(atual))
-            atual, tamanho = [add], len(add)
+        linha_com_quebra = linha + "\n"
+        if tamanho_atual + len(linha_com_quebra) > MAX_TG:
+            partes.append("".join(parte_atual))
+            parte_atual, tamanho_atual = [linha_com_quebra], len(linha_com_quebra)
         else:
-            atual.append(add); tamanho += len(add)
-    if atual:
-        partes.append("".join(atual))
+            parte_atual.append(linha_com_quebra)
+            tamanho_atual += len(linha_com_quebra)
+    if parte_atual:
+        partes.append("".join(parte_atual))
 
-    # enviar
-    if hasattr(update_or_query, "edit_message_text"):  # veio de callback
+    is_callback = hasattr(update_or_query, "edit_message_text")
+    chat = update_or_query.message.chat if is_callback else update_or_query.effective_chat
+
+    if is_callback:
         await update_or_query.edit_message_text(partes[0], parse_mode=parse_mode, reply_markup=reply_markup)
-        chat = update_or_query.message.chat
-        for p in partes[1:]:
-            await chat.send_message(p, parse_mode=parse_mode)
-    else:  # mensagem normal (/extrato)
-        chat = update_or_query.effective_chat
-        # primeiro pedaço pode levar o teclado, os demais sem teclado
-        for idx, p in enumerate(partes):
-            await chat.send_message(p, parse_mode=parse_mode, reply_markup=reply_markup if idx == 0 else None)
+        for parte in partes[1:]:
+            await chat.send_message(parte, parse_mode=parse_mode)
+    else:
+        for idx, parte in enumerate(partes):
+            await chat.send_message(parte, parse_mode=parse_mode, reply_markup=reply_markup if idx == 0 else None)
 
 
-def montar_texto_extrato(itens, totais, mes, ano, fatura_manager: Fatura):
-    def _fmt_valor_brl(d):
-        if not isinstance(d, Decimal):
+# ✅ Nomenclatura de variáveis melhorada aqui também
+def montar_texto_extrato(itens: list, totais: dict, mes_referencia: int, ano_referencia: int, fatura_manager: Fatura):
+    def _fmt_valor_brl(valor_decimal):
+        if not isinstance(valor_decimal, Decimal):
             try:
-                d = Decimal(str(d))
+                valor_decimal = Decimal(str(valor_decimal))
             except Exception:
-                d = Decimal("0")
-        return f"R$ {d.quantize(Decimal('0.01')):.2f}".replace(".", ",")
+                valor_decimal = Decimal("0")
+        return f"R$ {valor_decimal:.2f}".replace(".", ",")
 
-    def _calc_parcela_atual(meta, m, a, fatura_manager: Fatura):
-        try:
-            mi = int(meta.get("mes_inicio"))
-            ai = int(meta.get("ano_inicio"))
-            dia_compra = meta.get("dia_compra")
-            mi0, ai0 = efetivo_inicio_fatura(mi, ai, dia_compra, getattr(fatura_manager, "fechamento_dia", 9))
-            i = (int(a) * 12 + int(m)) - (ai0 * 12 + mi0)
-            return i + 1 if i >= 0 else None
-        except Exception:
-            return None
-
-    # usa mês/ano da fatura (quando vierem em 'totais') – útil p/ fatura aberta
-    mes_exibe = int(totais.get("mes_fatura", mes) or mes or 0)
-    ano_exibe = int(totais.get("ano_fatura", ano) or ano or 0)
+    # Usa mês/ano da fatura (quando vierem em 'totais') – útil p/ fatura aberta
+    mes_exibicao = int(totais.get("mes_fatura", mes_referencia) or mes_referencia or 0)
+    ano_exibicao = int(totais.get("ano_fatura", ano_referencia) or ano_referencia or 0)
 
     linhas = []
-    titulo = f"📜 <b>Extrato {mes_exibe:02d}/{ano_exibe}</b>" if (mes_exibe and ano_exibe) else "📜 <b>Extrato</b>"
+    titulo = f"📜 <b>Extrato {mes_exibicao:02d}/{ano_exibicao}</b>" if (mes_exibicao and ano_exibicao) else "📜 <b>Extrato Fatura Aberta</b>"
     linhas.append(titulo + "\n")
 
     if not itens:
-        linhas.append("Não há movimentações neste mês.")
+        linhas.append("Não há movimentações neste período.")
     else:
-        for i in itens:
-            dt = i.get("data")
-            # if hasattr(dt, "to_datetime"):
-            #     dt = dt.to_datetime()
-            dt = to_naive_utc(i.get("data"))
-            if not isinstance(dt, datetime):
-                base = datetime.now()
-                if mes_exibe and ano_exibe:
-                    base = datetime(ano_exibe, mes_exibe, 1)
-                dt = base
-            data_str = dt.strftime("%d/%m")
+        for item in itens:
+            data_item = to_naive_utc(item.get("data"))
+            if not isinstance(data_item, datetime):
+                data_item = datetime(ano_exibicao, mes_exibicao, 1) if mes_exibicao and ano_exibicao else datetime.now()
+            
+            data_str = data_item.strftime("%d/%m")
+            descricao = (item.get("descricao") or "").strip() or "(sem descrição)"
+            valor_str = _fmt_valor_brl(item.get("valor", 0))
+            tipo_item = item.get("tipo")
+            meta = item.get("meta") or {}
 
-            desc = (i.get("descricao") or "").strip() or "(sem descrição)"
-            valor = _fmt_valor_brl(i.get("valor", 0))
-            tipo  = i.get("tipo")
-
-            if tipo == "Parcela":
-                meta = i.get("meta") or {}
-                n_atual = _calc_parcela_atual(meta, mes_exibe or mes, ano_exibe or ano, fatura_manager)
-                total = meta.get("parcelas_total")
-                marcador = ""
-                if n_atual:
-                    marcador = f" ({n_atual}/{int(total)})" if total else f" ({n_atual})"
-                linhas.append(f"• {data_str} — {desc}{marcador} — {valor}")
-
-            elif tipo == "Gasto":
-                # fallback p/ caso raro de gasto à vista no pipeline fechado
-                meta = i.get("meta") or {}
-                n_atual = None
-                total = meta.get("parcelas_total")
-                if meta.get("mes_inicio") and meta.get("ano_inicio"):
-                    n_atual = _calc_parcela_atual(meta, mes_exibe or mes, ano_exibe or ano, fatura_manager)
-                marcador = f" ({n_atual}/{int(total)})" if (n_atual and total) else (f" ({n_atual})" if n_atual else "")
-                linhas.append(f"• {data_str} — {desc}{marcador} — {valor}")
-
+            if tipo_item in ["Parcela", "Gasto"]:
+                num_parcela = meta.get("parcela_num")
+                total_parcelas = meta.get("parcelas_total")
+                marcador_parcela = f" ({num_parcela}/{int(total_parcelas)})" if num_parcela and total_parcelas else ""
+                linhas.append(f"• {data_str} — {descricao}{marcador_parcela} — {valor_str}")
             else:  # Pagamento
-                linhas.append(f"• {data_str} — <b>Pagamento</b> — {desc} — {valor}")
+                linhas.append(f"• {data_str} — <b>{descricao}</b> — {valor_str}")
 
-    linhas.append("\n<b>Totais do mês</b>")
-    linhas.append(f"Parcelas: {_fmt_valor_brl(totais.get('parcelas_mes', 0))}")
-    linhas.append(f"Pagamentos: {_fmt_valor_brl(totais.get('pagamentos_mes', 0))}")
-    linhas.append(f"<b>Saldo do mês:</b> {_fmt_valor_brl(totais.get('saldo_mes', 0))}")
+    linhas.append("\n<b>Totais do Período</b>")
+    linhas.append(f"Gastos/Parcelas: {_fmt_valor_brl(totais.get('parcelas_mes', 0))}")
+    linhas.append(f"Pagamentos: -{_fmt_valor_brl(totais.get('pagamentos_mes', 0))}")
+    linhas.append(f"<b>Saldo do Período:</b> {_fmt_valor_brl(totais.get('saldo_mes', 0))}")
 
     return "\n".join(linhas)
 
@@ -1937,8 +1747,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if isinstance(err, (TimedOut, NetworkError)):
         logger.warning(f"Intermitência de rede/timeout: {err}")
         return
-
-    # Log detalhado pros demais
     logger.error("Erro não tratado", exc_info=err)
     if update:
         logger.error(f"Update problemático: {update}")
