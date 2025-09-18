@@ -691,8 +691,12 @@ class FirebaseCartaoCreditoBot:
         return itens_extrato, totais
 
 
-    # ✅ CORREÇÃO: Lógica de extrato de fatura aberta refatorada e corrigida.    
+    # ✅ CORREÇÃO: Lógica de fatura aberta agora mostra APENAS os novos gastos.
     def obter_extrato_fatura_aberta(self, user_id, hoje: datetime | None = None, fechamento_dia: int = 9):
+        """
+        Retorna os itens (APENAS GASTOS) que irão para a PRÓXIMA fatura (ainda aberta).
+        Pagamentos não são mostrados aqui, pois referem-se a faturas fechadas.
+        """
         user_id_str = str(user_id)
         if hoje is None:
             hoje = datetime.now()
@@ -701,6 +705,7 @@ class FirebaseCartaoCreditoBot:
         mes_proxima_fatura, ano_proxima_fatura = self.fatura_manager.get_proxima_fatura_ref(hoje_utc, fechamento_dia)
         itens_extrato = []
 
+        # --- Busca todas as parcelas de gastos que caem na PRÓXIMA fatura ---
         gastos_ref = self.db.collection(COLLECTION_GASTOS)\
             .where("user_id", "==", user_id_str)\
             .where("ativo", "==", True)
@@ -711,35 +716,17 @@ class FirebaseCartaoCreditoBot:
             if item:
                 itens_extrato.append(item)
 
-        inicio_periodo_aberto = self.fatura_manager.get_inicio_periodo_aberto(hoje_utc, fechamento_dia)
-        pagamentos_ref = self.db.collection(COLLECTION_PAGAMENTOS)\
-            .where("user_id", "==", user_id_str)\
-            .where("data_pagamento", ">=", inicio_periodo_aberto)\
-            .where("data_pagamento", "<=", hoje_utc)
-
-        for pagamento_doc in pagamentos_ref.stream():
-            pagamento = self._float_para_decimal(pagamento_doc.to_dict() or {})
-            valor = pagamento.get("valor", Decimal("0.0"))
-            data_pagamento = to_naive_utc(pagamento.get("data_pagamento")) or inicio_periodo_aberto
-
-            itens_extrato.append({
-                "tipo": "Pagamento",
-                "descricao": (pagamento.get("descricao") or "Pagamento").strip(),
-                "valor": valor,
-                "data": data_pagamento,
-                "meta": {"pagamento_id": pagamento_doc.id}
-            })
+        # O bloco que buscava pagamentos foi REMOVIDO daqui.
 
         itens_extrato.sort(key=lambda item: item["data"])
 
         total_parcelas = sum((item["valor"] for item in itens_extrato if item["tipo"] in ["Parcela", "Gasto"]), Decimal("0.00"))
-        total_pagamentos = sum((item["valor"] for item in itens_extrato if item["tipo"] == "Pagamento"), Decimal("0.00"))
-        saldo = (total_parcelas - total_pagamentos).quantize(Decimal("0.01"))
-
+        
+        # Como não há pagamentos nesta visualização, o saldo do período é simplesmente o total de gastos.
         totais = {
             "parcelas_mes": total_parcelas,
-            "pagamentos_mes": total_pagamentos,
-            "saldo_mes": saldo,
+            "pagamentos_mes": Decimal("0.00"), # Pagamentos não são considerados aqui
+            "saldo_mes": total_parcelas,      # O saldo é o total a pagar na próxima fatura
             "mes_fatura": mes_proxima_fatura,
             "ano_fatura": ano_proxima_fatura,
         }
@@ -1696,7 +1683,7 @@ async def reply_long(update_or_query, texto, reply_markup=None, parse_mode="HTML
             await chat.send_message(parte, parse_mode=parse_mode, reply_markup=reply_markup if idx == 0 else None)
 
 
-# ✅ Nomenclatura de variáveis melhorada aqui também
+# ✅ Nomenclatura de variáveis melhorada e ajuste para não exibir pagamentos zerados
 def montar_texto_extrato(itens: list, totais: dict, mes_referencia: int, ano_referencia: int, fatura_manager: Fatura):
     def _fmt_valor_brl(valor_decimal):
         if not isinstance(valor_decimal, Decimal):
@@ -1706,12 +1693,16 @@ def montar_texto_extrato(itens: list, totais: dict, mes_referencia: int, ano_ref
                 valor_decimal = Decimal("0")
         return f"R$ {valor_decimal:.2f}".replace(".", ",")
 
-    # Usa mês/ano da fatura (quando vierem em 'totais') – útil p/ fatura aberta
     mes_exibicao = int(totais.get("mes_fatura", mes_referencia) or mes_referencia or 0)
     ano_exibicao = int(totais.get("ano_fatura", ano_referencia) or ano_referencia or 0)
 
     linhas = []
-    titulo = f"📜 <b>Extrato {mes_exibicao:02d}/{ano_exibicao}</b>" if (mes_exibicao and ano_exibicao) else "📜 <b>Extrato Fatura Aberta</b>"
+    # Altera o título para ser mais claro quando for uma fatura aberta
+    if totais.get("pagamentos_mes", 0) > 0:
+         titulo = f"📜 <b>Extrato Fechado {mes_exibicao:02d}/{ano_exibicao}</b>"
+    else:
+         titulo = f"🧾 <b>Fatura Aberta {mes_exibicao:02d}/{ano_exibicao}</b>"
+    
     linhas.append(titulo + "\n")
 
     if not itens:
@@ -1733,12 +1724,17 @@ def montar_texto_extrato(itens: list, totais: dict, mes_referencia: int, ano_ref
                 total_parcelas = meta.get("parcelas_total")
                 marcador_parcela = f" ({num_parcela}/{int(total_parcelas)})" if num_parcela and total_parcelas else ""
                 linhas.append(f"• {data_str} — {descricao}{marcador_parcela} — {valor_str}")
-            else:  # Pagamento
+            else:
                 linhas.append(f"• {data_str} — <b>{descricao}</b> — {valor_str}")
 
     linhas.append("\n<b>Totais do Período</b>")
     linhas.append(f"Gastos/Parcelas: {_fmt_valor_brl(totais.get('parcelas_mes', 0))}")
-    linhas.append(f"Pagamentos: -{_fmt_valor_brl(totais.get('pagamentos_mes', 0))}")
+    
+    # CORREÇÃO: Só exibe a linha de pagamentos se houver algum pagamento no período.
+    pagamentos_do_periodo = totais.get('pagamentos_mes', 0)
+    if pagamentos_do_periodo > 0:
+        linhas.append(f"Pagamentos: -{_fmt_valor_brl(pagamentos_do_periodo)}")
+    
     linhas.append(f"<b>Saldo do Período:</b> {_fmt_valor_brl(totais.get('saldo_mes', 0))}")
 
     return "\n".join(linhas)
