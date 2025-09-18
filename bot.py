@@ -833,7 +833,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Use o menu abaixo para navegar:
 """
 
-    keyboard = criar_menu_principal(user_id)
+    keyboard = criar_menu_principal(user.id)
     await update.message.reply_text(
         welcome_message,
         reply_markup=keyboard,
