@@ -856,7 +856,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     user_name = query.from_user.first_name
     data = query.data    
-    await query.answer()   
+    await query.answer()    
     cartao_bot.registrar_usuario(user_id, user_name, query.from_user.username)
     
     if data == "menu_principal":
@@ -971,8 +971,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_fatura_atual":
         # Mostra a fatura ABERTA do próprio usuário
         itens, totais = cartao_bot.obter_extrato_fatura_aberta(user_id)
-        texto = montar_texto_extrato(itens, totais, mes=0, ano=0, fatura_manager=cartao_bot.fatura_manager)
-
+        # CORREÇÃO: Argumentos 'mes' e 'ano' renomeados para 'mes_referencia' e 'ano_referencia'
+        texto = montar_texto_extrato(itens, totais, mes_referencia=0, ano_referencia=0, fatura_manager=cartao_bot.fatura_manager)
 
         await reply_long(
             query,
@@ -1084,10 +1084,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(texto_relatorio, reply_markup=keyboard, parse_mode="HTML")
     
     elif data == "menu_extrato_mes":
-        user_id = update.effective_user.id
+        # Nota: Esta opção parece ter a mesma funcionalidade de "menu_fatura_atual".
+        # Ambas buscam a fatura aberta.
         itens, totais = cartao_bot.obter_extrato_fatura_aberta(user_id)
-        # passe mes/ano “qualquer”, o formatter usará mes_fatura/ano_fatura vindos de 'totais'
-        texto = montar_texto_extrato(itens, totais, mes=0, ano=0, fatura_manager=cartao_bot.fatura_manager)
+        # CORREÇÃO: Argumentos 'mes' e 'ano' renomeados para 'mes_referencia' e 'ano_referencia'
+        texto = montar_texto_extrato(itens, totais, mes_referencia=0, ano_referencia=0, fatura_manager=cartao_bot.fatura_manager)
 
         await reply_long(
             query,
@@ -1488,8 +1489,8 @@ async def processar_extrato_admin(update, context, texto: str):
             )
             return
 
-        termo = partes[0]
-        mes = ano = None
+        termo_busca = partes[0]
+        mes, ano = None, None
 
         if len(partes) >= 3 and partes[1].isdigit() and partes[2].isdigit():
             mes, ano = int(partes[1]), int(partes[2])
@@ -1497,26 +1498,27 @@ async def processar_extrato_admin(update, context, texto: str):
             agora = datetime.now()
             mes, ano = agora.month, agora.year
 
-        u = cartao_bot.buscar_usuario_por_nome_ou_username(termo)
-        if not u:
+        usuario = cartao_bot.buscar_usuario_por_nome_ou_username(termo_busca)
+        if not usuario:
             await update.message.reply_text(
                 "❌ Usuário não encontrado.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancelar", callback_data="cancelar_operacao")]])
             )
             return
 
-        target_id_str = str(u["user_id"])
+        target_id_str = str(usuario["user_id"])
+        nome_exibicao = usuario.get('name') or '@' + (usuario.get('username') or target_id_str)
 
-        # Só nome → fatura aberta (o que vai para a próxima fatura).
-        # Nome + mes + ano → fatura fechada (consumo 10→09).
         if len(partes) == 1:
             itens, totais = cartao_bot.obter_extrato_fatura_aberta(target_id_str)
-            texto_resp = (f"👤 <b>{u.get('name') or '@'+(u.get('username') or target_id_str)}</b>\n" +
-                        montar_texto_extrato(itens, totais, mes=0, ano=0, fatura_manager=cartao_bot.fatura_manager))
+            # CORREÇÃO: Argumentos 'mes' e 'ano' renomeados para 'mes_referencia' e 'ano_referencia'
+            texto_resp = (f"👤 <b>{nome_exibicao}</b>\n" +
+                        montar_texto_extrato(itens, totais, mes_referencia=0, ano_referencia=0, fatura_manager=cartao_bot.fatura_manager))
         else:
             itens, totais = cartao_bot.obter_extrato_consumo_usuario(target_id_str, mes, ano)
-            texto_resp = (f"👤 <b>{u.get('name') or '@' + (u.get('username') or target_id_str)}</b>\n" +
-                        montar_texto_extrato(itens, totais, mes, ano, fatura_manager=cartao_bot.fatura_manager))
+            # CORREÇÃO: Argumentos 'mes' e 'ano' renomeados para 'mes_referencia' e 'ano_referencia'
+            texto_resp = (f"👤 <b>{nome_exibicao}</b>\n" +
+                        montar_texto_extrato(itens, totais, mes_referencia=mes, ano_referencia=ano, fatura_manager=cartao_bot.fatura_manager))
 
         await reply_long(
             update,
@@ -1647,16 +1649,19 @@ async def extrato(update, context):
     args = context.args or []
     agora = datetime.now()
 
+    mes_arg, ano_arg = None, None
+
     if len(args) == 0:
-        mes, ano = agora.month, agora.year
+        mes_arg, ano_arg = agora.month, agora.year
     elif len(args) == 2 and all(a.isdigit() for a in args):
-        mes, ano = int(args[0]), int(args[1])
+        mes_arg, ano_arg = int(args[0]), int(args[1])
     else:
-        await update.message.reply_text("Use: /extrato [mes ano]\nEx.: /extrato 8 2025")
+        await update.message.reply_text("Use: /extrato [mes ano]\nEx.: /extrato 9 2025")
         return
 
-    itens, totais = cartao_bot.obter_extrato_consumo_usuario(user.id, mes, ano)
-    texto = montar_texto_extrato(itens, totais, mes, ano, fatura_manager=cartao_bot.fatura_manager)
+    itens, totais = cartao_bot.obter_extrato_consumo_usuario(user.id, mes_arg, ano_arg)
+    # CORREÇÃO: Argumentos 'mes' e 'ano' renomeados para 'mes_referencia' e 'ano_referencia'
+    texto = montar_texto_extrato(itens, totais, mes_referencia=mes_arg, ano_referencia=ano_arg, fatura_manager=cartao_bot.fatura_manager)
     await reply_long(update, texto, parse_mode="HTML")
 
 
