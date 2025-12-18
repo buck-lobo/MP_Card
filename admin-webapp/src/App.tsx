@@ -347,6 +347,8 @@ function App() {
   const [userEditPagamentoValor, setUserEditPagamentoValor] =
     useState<string>("");
   const [userShowAllExtrato, setUserShowAllExtrato] = useState(false);
+  const [userShowAllGastos, setUserShowAllGastos] = useState(false);
+  const [userShowAllPagamentos, setUserShowAllPagamentos] = useState(false);
   const [userExtratoFilter, setUserExtratoFilter] = useState<
     "all" | "gastos" | "pagamentos"
   >("all");
@@ -355,6 +357,19 @@ function App() {
     Record<string, any>
   >({});
   const [userRequestingAccess, setUserRequestingAccess] = useState(false);
+  const [adminAccessRequests, setAdminAccessRequests] = useState<any[]>([]);
+  const [adminAccessRequestsLoading, setAdminAccessRequestsLoading] =
+    useState(false);
+  const [adminAccessRequestsError, setAdminAccessRequestsError] = useState<
+    string | null
+  >(null);
+  const [adminAccessRequestsReloadToken, setAdminAccessRequestsReloadToken] =
+    useState(0);
+  const [adminAccessRequestsFilter, setAdminAccessRequestsFilter] = useState<
+    "pending" | "approved" | "all"
+  >("pending");
+  const [adminAccessRequestsSearch, setAdminAccessRequestsSearch] =
+    useState<string>("");
   const [activePanel, setActivePanel] = useState<"user" | "admin">("user");
   const [adminActiveTab, setAdminActiveTab] = useState<
     "overview" | "lancamentos" | "pagamentos" | "config"
@@ -386,6 +401,228 @@ function App() {
 
   const functionsBaseUrl =
     "https://us-central1-bot-cartao-credito.cloudfunctions.net";
+
+  async function handleAdminApproveAccess(userId: string, openAfter?: boolean) {
+    setError(null);
+    setActionMessage(null);
+
+    if (!webApp?.initData) {
+      setError(
+        "Este painel deve ser aberto dentro do Telegram para executar ações reais."
+      );
+      return;
+    }
+
+    const confirmed = globalThis.confirm(
+      `Aprovar acesso do usuário ${userId}? (Isso marcará o usuário como autorizado)`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const resp = await fetch(`${functionsBaseUrl}/adminUpdateUsuario`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-telegram-init-data": webApp.initData,
+        },
+        body: JSON.stringify({ userId, autorizado: true }),
+      });
+
+      let data: any = null;
+      try {
+        data = await resp.json();
+      } catch {
+        data = null;
+      }
+
+      if (!resp.ok) {
+        setError((data && data.error) || "Erro ao aprovar acesso.");
+        return;
+      }
+
+      setActionMessage("Acesso liberado com sucesso.");
+      setAdminAccessRequestsReloadToken((t) => t + 1);
+      if (adminAccessRequestsFilter === "pending") {
+        setAdminAccessRequests((current) =>
+          current.filter((item: any) => String(item?.user_id || "") !== userId)
+        );
+      }
+
+      if (openAfter) {
+        setTargetUserId(userId);
+        await loadAdminUserDataById(userId);
+      }
+    } catch (err: any) {
+      console.error("Erro ao aprovar acesso", err);
+      setError(err?.message || "Erro ao aprovar acesso.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function loadAdminUserDataById(userId: string) {
+    setError(null);
+    setActionMessage(null);
+    setGastos([]);
+    setPagamentos([]);
+    setBillingCycles([]);
+    setSelectedCycle(null);
+    setCycleSummary(null);
+    setSelectedGastoId(null);
+    setSelectedPagamentoId(null);
+    setEditGastoValorTotal("");
+    setEditGastoParcelas("");
+    setEditPagamentoValor("");
+    setUserDetails(null);
+    setEditUserName("");
+    setEditUserUsername("");
+    setEditUserAtivo(true);
+    setEditUserAutorizado(false);
+    setUserSuggestions([]);
+
+    const normalized = userId.trim();
+    if (!normalized) {
+      setError("Informe o ID do usuário alvo.");
+      return;
+    }
+
+    if (!webApp?.initData) {
+      setError(
+        "Este painel deve ser aberto dentro do Telegram para carregar dados reais."
+      );
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const headers: HeadersInit = {
+        "x-telegram-init-data": webApp.initData,
+      };
+
+      const [gastosResp, pagamentosResp, usuarioResp] = await Promise.all([
+        fetch(
+          `${functionsBaseUrl}/adminListGastos?userId=${encodeURIComponent(
+            normalized
+          )}&limit=500`,
+          { headers }
+        ),
+        fetch(
+          `${functionsBaseUrl}/adminListPagamentos?userId=${encodeURIComponent(
+            normalized
+          )}&limit=500`,
+          { headers }
+        ),
+        fetch(
+          `${functionsBaseUrl}/adminGetUsuario?userId=${encodeURIComponent(
+            normalized
+          )}`,
+          { headers }
+        ),
+      ]);
+
+      if (!gastosResp.ok) {
+        throw new Error(`Erro ao carregar gastos (${gastosResp.status}).`);
+      }
+      if (!pagamentosResp.ok) {
+        throw new Error(`Erro ao carregar pagamentos (${pagamentosResp.status}).`);
+      }
+
+      const gastosJson = await gastosResp.json();
+      const pagamentosJson = await pagamentosResp.json();
+      let usuarioJson: any | null = null;
+      if (usuarioResp.ok) {
+        try {
+          usuarioJson = await usuarioResp.json();
+        } catch {
+          usuarioJson = null;
+        }
+      }
+
+      const newGastos = Array.isArray(gastosJson.itens) ? gastosJson.itens : [];
+      const newPagamentos = Array.isArray(pagamentosJson.itens)
+        ? pagamentosJson.itens
+        : [];
+
+      setGastos(newGastos);
+      setPagamentos(newPagamentos);
+
+      if (usuarioJson && usuarioJson.dados) {
+        const dados = usuarioJson.dados;
+        setUserDetails(dados);
+        setEditUserName(String(dados.name || ""));
+        setEditUserUsername(dados.username ?? "");
+        setEditUserAtivo(dados.ativo !== false);
+        setEditUserAutorizado(!!dados.autorizado);
+      } else {
+        setUserDetails(null);
+      }
+
+      const cyclesSet = new Set<string>();
+      newGastos.forEach((g: any) => {
+        const gastoCycles = getGastoCycles(g);
+        gastoCycles.forEach((ciclo) => cyclesSet.add(ciclo));
+      });
+      newPagamentos.forEach((p: any) => {
+        const ciclo = getCycleFromIsoDate(p.data_pagamento);
+        if (ciclo) {
+          cyclesSet.add(ciclo);
+        }
+      });
+
+      const allCycles = Array.from(cyclesSet).sort((a, b) => {
+        const [ma, ya] = a.split("/").map(Number);
+        const [mb, yb] = b.split("/").map(Number);
+        return yb * 12 + mb - (ya * 12 + ma);
+      });
+
+      const now = new Date();
+      const currentMonth = now.getMonth() + 1;
+      const currentYear = now.getFullYear();
+      const maxIndex = currentYear * 12 + currentMonth + 1;
+
+      const limitedCycles = allCycles.filter((cycle) => {
+        const [m, y] = cycle.split("/").map(Number);
+        if (!m || !y) {
+          return false;
+        }
+        const idx = y * 12 + m;
+        return idx <= maxIndex;
+      });
+
+      const cycles = limitedCycles.length > 0 ? limitedCycles : allCycles;
+      setBillingCycles(cycles);
+
+      if (cycles.length > 0) {
+        const diaVencimento = 10;
+        const hojeDia = now.getDate();
+        let alvoMes = currentMonth;
+        let alvoAno = currentYear;
+        if (hojeDia >= diaVencimento + 1) {
+          alvoMes += 1;
+          if (alvoMes > 12) {
+            alvoMes = 1;
+            alvoAno += 1;
+          }
+        }
+        const alvoCiclo = `${String(alvoMes).padStart(2, "0")}/${alvoAno}`;
+        if (cycles.includes(alvoCiclo)) {
+          setSelectedCycle(alvoCiclo);
+        } else {
+          setSelectedCycle(cycles[0]);
+        }
+      }
+
+      setAdminActiveTab("lancamentos");
+    } catch (err: any) {
+      console.error(err);
+      setError(err?.message || "Erro ao carregar dados.");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
     async function fetchUserLancamentos() {
@@ -462,6 +699,12 @@ function App() {
 
     fetchUserLancamentos();
   }, [webApp, functionsBaseUrl, userReloadToken, userSelectedCycle, userOverview]);
+
+  useEffect(() => {
+    setUserShowAllGastos(false);
+    setUserShowAllPagamentos(false);
+    setUserShowAllExtrato(false);
+  }, [userSelectedCycle]);
 
   function clearUserOverviewCacheForCycle(cycle: string | null): void {
     if (!cycle) {
@@ -858,6 +1101,7 @@ function App() {
         data?.message ||
           "Seu pedido de liberação foi enviado. Assim que for aprovado, volte a abrir o mini app."
       );
+      setUserReloadToken((token) => token + 1);
     } catch (err: any) {
       console.error("Erro em handleUserRequestAccess", err);
       setUserPanelError(
@@ -1197,6 +1441,7 @@ function App() {
               isAdmin: data.isAdmin ?? false,
               user_id:
                 data.user_id ?? (user ? String(user.id) : null),
+              solicitacao_acesso: data.solicitacao_acesso ?? null,
             });
             return;
           }
@@ -1227,6 +1472,67 @@ function App() {
 
     fetchUserOverview();
   }, [webApp, functionsBaseUrl, userReloadToken, user, userSelectedCycle]);
+
+  useEffect(() => {
+    async function fetchAdminAccessRequests() {
+      if (!isAdmin || activePanel !== "admin" || !webApp?.initData) {
+        setAdminAccessRequests([]);
+        return;
+      }
+
+      setAdminAccessRequestsLoading(true);
+      setAdminAccessRequestsError(null);
+      try {
+        const headers: HeadersInit = {
+          "x-telegram-init-data": webApp.initData,
+        };
+
+        const statusQuery =
+          adminAccessRequestsFilter === "all"
+            ? ""
+            : `status=${encodeURIComponent(adminAccessRequestsFilter)}&`;
+        const resp = await fetch(
+          `${functionsBaseUrl}/adminListAccessRequests?${statusQuery}limit=50`,
+          { headers }
+        );
+
+        let data: any = null;
+        try {
+          data = await resp.json();
+        } catch {
+          data = null;
+        }
+
+        if (!resp.ok) {
+          setAdminAccessRequests([]);
+          setAdminAccessRequestsError(
+            (data && data.error) || "Erro ao carregar solicitações pendentes."
+          );
+          return;
+        }
+
+        const items = Array.isArray(data?.items) ? data.items : [];
+        setAdminAccessRequests(items);
+      } catch (err: any) {
+        console.error("Erro ao carregar solicitações pendentes", err);
+        setAdminAccessRequests([]);
+        setAdminAccessRequestsError(
+          err?.message || "Erro ao carregar solicitações pendentes."
+        );
+      } finally {
+        setAdminAccessRequestsLoading(false);
+      }
+    }
+
+    fetchAdminAccessRequests();
+  }, [
+    isAdmin,
+    activePanel,
+    webApp,
+    functionsBaseUrl,
+    adminAccessRequestsReloadToken,
+    adminAccessRequestsFilter,
+  ]);
 
   useEffect(() => {
     async function fetchUserPrevTotals() {
@@ -1569,180 +1875,7 @@ function App() {
 
   async function handleLoadData(event: React.FormEvent) {
     event.preventDefault();
-    setError(null);
-    setActionMessage(null);
-    setGastos([]);
-    setPagamentos([]);
-    setBillingCycles([]);
-    setSelectedCycle(null);
-    setCycleSummary(null);
-    setSelectedGastoId(null);
-    setSelectedPagamentoId(null);
-    setEditGastoValorTotal("");
-    setEditGastoParcelas("");
-    setEditPagamentoValor("");
-    setUserDetails(null);
-    setEditUserName("");
-    setEditUserUsername("");
-    setEditUserAtivo(true);
-    setEditUserAutorizado(false);
-    setUserSuggestions([]);
-
-    const userId = targetUserId.trim();
-    if (!userId) {
-      setError("Informe o ID do usuário alvo.");
-      return;
-    }
-
-    if (!webApp?.initData) {
-      setError(
-        "Este painel deve ser aberto dentro do Telegram para carregar dados reais."
-      );
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const headers: HeadersInit = {
-        "x-telegram-init-data": webApp.initData,
-      };
-
-      const [gastosResp, pagamentosResp, usuarioResp] = await Promise.all([
-        fetch(
-          `${functionsBaseUrl}/adminListGastos?userId=${encodeURIComponent(
-            userId
-          )}&limit=500`,
-          { headers }
-        ),
-        fetch(
-          `${functionsBaseUrl}/adminListPagamentos?userId=${encodeURIComponent(
-            userId
-          )}&limit=500`,
-          { headers }
-        ),
-        fetch(
-          `${functionsBaseUrl}/adminGetUsuario?userId=${encodeURIComponent(
-            userId
-          )}`,
-          { headers }
-        ),
-      ]);
-
-      if (!gastosResp.ok) {
-        throw new Error(`Erro ao carregar gastos (${gastosResp.status}).`);
-      }
-      if (!pagamentosResp.ok) {
-        throw new Error(
-          `Erro ao carregar pagamentos (${pagamentosResp.status}).`
-        );
-      }
-
-      const gastosJson = await gastosResp.json();
-      const pagamentosJson = await pagamentosResp.json();
-      let usuarioJson: any | null = null;
-      if (usuarioResp.ok) {
-        try {
-          usuarioJson = await usuarioResp.json();
-        } catch {
-          usuarioJson = null;
-        }
-      }
-
-      const newGastos = Array.isArray(gastosJson.itens)
-        ? gastosJson.itens
-        : [];
-      const newPagamentos = Array.isArray(pagamentosJson.itens)
-        ? pagamentosJson.itens
-        : [];
-
-      setGastos(newGastos);
-      setPagamentos(newPagamentos);
-
-      if (usuarioJson && usuarioJson.dados) {
-        const dados = usuarioJson.dados;
-        setUserDetails(dados);
-        setEditUserName(String(dados.name || ""));
-        setEditUserUsername(dados.username ?? "");
-        setEditUserAtivo(dados.ativo !== false);
-        setEditUserAutorizado(!!dados.autorizado);
-      } else {
-        setUserDetails(null);
-      }
-
-      const cyclesSet = new Set<string>();
-
-      newGastos.forEach((g: any) => {
-        const gastoCycles = getGastoCycles(g);
-        gastoCycles.forEach((ciclo) => cyclesSet.add(ciclo));
-      });
-
-      newPagamentos.forEach((p: any) => {
-        const ciclo = getCycleFromIsoDate(p.data_pagamento);
-        if (ciclo) {
-          cyclesSet.add(ciclo);
-        }
-      });
-
-      const allCycles = Array.from(cyclesSet).sort((a, b) => {
-        const [ma, ya] = a.split("/").map(Number);
-        const [mb, yb] = b.split("/").map(Number);
-        return yb * 12 + mb - (ya * 12 + ma);
-      });
-
-      const now = new Date();
-      const currentMonth = now.getMonth() + 1;
-      const currentYear = now.getFullYear();
-      const maxIndex = currentYear * 12 + currentMonth + 1; // fatura atual + 1
-
-      const limitedCycles = allCycles.filter((cycle) => {
-        const [m, y] = cycle.split("/").map(Number);
-        if (!m || !y) {
-          return false;
-        }
-        const idx = y * 12 + m;
-        return idx <= maxIndex;
-      });
-
-      const cycles = limitedCycles.length > 0 ? limitedCycles : allCycles;
-
-      setBillingCycles(cycles);
-
-      if (cycles.length > 0) {
-        // Escolha do ciclo padrão:
-        // - Até 1 dia após o vencimento, preferir a fatura "atual".
-        // - Depois disso, preferir a fatura "futura" (próximo ciclo), se existir.
-        const diaVencimento = 10;
-        const hojeDia = now.getDate();
-
-        let alvoMes = currentMonth;
-        let alvoAno = currentYear;
-
-        if (hojeDia >= diaVencimento + 1) {
-          alvoMes += 1;
-          if (alvoMes > 12) {
-            alvoMes = 1;
-            alvoAno += 1;
-          }
-        }
-
-        const alvoCiclo = `${String(alvoMes).padStart(2, "0")}/${alvoAno}`;
-
-        if (cycles.includes(alvoCiclo)) {
-          setSelectedCycle(alvoCiclo);
-        } else {
-          setSelectedCycle(cycles[0]);
-        }
-      }
-
-      // Após carregar os dados com sucesso, levar o admin direto
-      // para a aba de Lançamentos, que é onde ele mais atua.
-      setAdminActiveTab("lancamentos");
-    } catch (err: any) {
-      console.error(err);
-      setError(err?.message || "Erro ao carregar dados.");
-    } finally {
-      setLoading(false);
-    }
+    await loadAdminUserDataById(targetUserId);
   }
 
   function handleSelectGasto(g: any) {
@@ -2708,9 +2841,112 @@ function App() {
               {infoDialog === "saldo_acumulado" && (
                 <>
                   <h2 className="modal-title">Saldo acumulado</h2>
-                  <p>
-                    Considera o saldo total do cartão até o ciclo selecionado, com o ajuste do ciclo base.
-                  </p>
+                  {(() => {
+                    const ctxTotais: any = cycleSummary
+                      ? {
+                          saldo_mes: cycleSummary.saldo_mes,
+                          saldo_acumulado: cycleSummary.saldo_acumulado,
+                        }
+                      : userTotais
+                      ? {
+                          saldo_mes: Number(userTotais.saldo_mes || 0),
+                          saldo_acumulado: Number(
+                            (userTotais.saldo_acumulado ?? userSaldoAtual) || 0
+                          ),
+                        }
+                      : null;
+
+                    if (!ctxTotais) {
+                      return (
+                        <p>
+                          Considera o saldo total do cartão até o ciclo selecionado.
+                        </p>
+                      );
+                    }
+
+                    const saldoMes = Number(ctxTotais.saldo_mes || 0);
+                    const saldoAcumulado = Number(ctxTotais.saldo_acumulado || 0);
+                    const carryOver = Number(
+                      (saldoAcumulado - saldoMes).toFixed(2)
+                    );
+
+                    const saldoMesColor =
+                      Number.isFinite(saldoMes) && Math.abs(saldoMes) >= 0.005
+                        ? saldoMes > 0
+                          ? "#f97373"
+                          : "#4ade80"
+                        : "#e5e7eb";
+
+                    const carryColor =
+                      Number.isFinite(carryOver) && Math.abs(carryOver) >= 0.005
+                        ? carryOver > 0
+                          ? "#f97373"
+                          : "#4ade80"
+                        : "#9ca3af";
+
+                    const totalInfo = getSaldoAcumuladoInfo(saldoAcumulado);
+
+                    return (
+                      <>
+                        <p>
+                          O <strong>saldo acumulado</strong> é o total a pagar (ou
+                          crédito) considerando o histórico até o ciclo
+                          selecionado.
+                        </p>
+
+                        <div className="subcard">
+                          <div className="subcard-title">Decomposição</div>
+                          <div className="resumo-fatura-linha">
+                            <span className="resumo-fatura-label">
+                              Saldo deste ciclo
+                            </span>
+                            <span
+                              className="resumo-fatura-valor"
+                              style={{ color: saldoMesColor }}
+                            >
+                              {formatCurrencyBRL(saldoMes)}
+                            </span>
+                          </div>
+
+                          {Number.isFinite(carryOver) &&
+                            Math.abs(carryOver) >= 0.005 && (
+                              <div className="resumo-fatura-linha">
+                                <span className="resumo-fatura-label">
+                                  Saldo vindo de ciclos anteriores
+                                </span>
+                                <span
+                                  className="resumo-fatura-valor"
+                                  style={{ color: carryColor }}
+                                >
+                                  {formatCurrencyBRL(carryOver)}
+                                </span>
+                              </div>
+                            )}
+
+                          <div className="resumo-fatura-linha resumo-fatura-acumulado">
+                            <span
+                              className="resumo-fatura-label"
+                              style={{ color: totalInfo.color }}
+                            >
+                              {totalInfo.label}
+                            </span>
+                            <span
+                              className="resumo-fatura-valor"
+                              style={{ color: totalInfo.color }}
+                            >
+                              {formatCurrencyBRL(saldoAcumulado)}
+                            </span>
+                          </div>
+                        </div>
+
+                        <p className="section-subtitle">
+                          Exemplo: se você gastou R$ 1.359,69 neste ciclo, mas o
+                          saldo acumulado é R$ 1.427,83, então R$ 68,14 vem de
+                          ciclos anteriores.
+                        </p>
+                      </>
+                    );
+                  })()}
                 </>
               )}
               <div className="modal-footer">
@@ -2826,6 +3062,20 @@ function App() {
                   options={userBillingCycles}
                   onChange={(next) => setUserSelectedCycle(next || null)}
                 />
+                <div className="button-row mt-1">
+                  <button
+                    type="button"
+                    className="button--sm button--ghost"
+                    disabled={userLoading || saving}
+                    onClick={() => {
+                      clearUserOverviewCacheForCycle(userSelectedCycle);
+                      setUserReloadToken((t) => t + 1);
+                      setUserRecurringReloadToken((t) => t + 1);
+                    }}
+                  >
+                    Atualizar
+                  </button>
+                </div>
               </div>
             )}
 
@@ -2838,7 +3088,95 @@ function App() {
               <div className="subcard">
                 <div className="section-title">Acesso ainda não liberado</div>
                 <p className="section-subtitle section-subtitle--tight">
-                  Aguarde um administrador liberar seu acesso pelo painel.
+                  {userOverview?.error
+                    ? String(userOverview.error)
+                    : "Seu acesso ainda não foi liberado para este mini app."}
+                </p>
+
+                {(() => {
+                  const solicit = userOverview?.solicitacao_acesso;
+                  if (!solicit) {
+                    return null;
+                  }
+                  const status = String(solicit?.status || "").toLowerCase();
+                  if (!status) {
+                    return null;
+                  }
+
+                  if (status === "approved") {
+                    return (
+                      <div className="admin-access-request">
+                        <div className="admin-status--approved">
+                          Solicitação aprovada
+                        </div>
+                        <div className="admin-access-meta">
+                          {solicit?.aprovado_em
+                            ? `Aprovado em ${formatDateTime(solicit.aprovado_em)}`
+                            : ""}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  if (status === "pending") {
+                    return (
+                      <div className="admin-access-request">
+                        <div className="admin-status--pending">
+                          Solicitação pendente
+                        </div>
+                        <div className="admin-access-meta">
+                          {solicit?.solicitado_em
+                            ? `Solicitado em ${formatDateTime(
+                                solicit.solicitado_em
+                              )}`
+                            : ""}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  return null;
+                })()}
+
+                <div className="button-row mt-2">
+                  <button
+                    type="button"
+                    disabled={(() => {
+                      const status = String(
+                        userOverview?.solicitacao_acesso?.status || ""
+                      ).toLowerCase();
+                      return userRequestingAccess || status === "pending";
+                    })()}
+                    onClick={handleUserRequestAccess}
+                  >
+                    {(() => {
+                      const status = String(
+                        userOverview?.solicitacao_acesso?.status || ""
+                      ).toLowerCase();
+                      if (userRequestingAccess) {
+                        return "Enviando pedido...";
+                      }
+                      if (status === "pending") {
+                        return "Pedido já enviado";
+                      }
+                      return "Pedir liberação de acesso";
+                    })()}
+                  </button>
+                  <button
+                    type="button"
+                    className="button--sm button--ghost"
+                    disabled={userLoading || saving}
+                    onClick={() => {
+                      clearUserOverviewCacheForCycle(userSelectedCycle);
+                      setUserReloadToken((t) => t + 1);
+                    }}
+                  >
+                    Atualizar status
+                  </button>
+                </div>
+                <p className="muted-text muted-text--sm mt-1">
+                  Assim que um administrador aprovar, feche e abra o mini app
+                  novamente.
                 </p>
               </div>
             ) : (
@@ -2899,13 +3237,51 @@ function App() {
                     </div>
                     <div className="resumo-fatura-linha">
                       <span className="resumo-fatura-label">Saldo deste ciclo</span>
-                      <span
-                        className="resumo-fatura-valor"
-                        style={{ color: userSaldoMesColor }}
-                      >
-                        {formatCurrencyBRL(Number(userTotais.saldo_mes || 0))}
+                      <span className="resumo-fatura-direita">
+                        <span
+                          className="resumo-fatura-valor"
+                          style={{ color: userSaldoMesColor }}
+                        >
+                          {formatCurrencyBRL(Number(userTotais.saldo_mes || 0))}
+                        </span>
+                        <button
+                          type="button"
+                          className="button--sm button--ghost"
+                          onClick={() => setInfoDialog("saldo_ciclo")}
+                        >
+                          info
+                        </button>
                       </span>
                     </div>
+
+                    {(() => {
+                      const info = getSaldoAcumuladoInfo(userSaldoAtual);
+                      return (
+                        <div className="resumo-fatura-linha resumo-fatura-acumulado">
+                          <span
+                            className="resumo-fatura-label"
+                            style={{ color: info.color }}
+                          >
+                            {info.label}
+                          </span>
+                          <span className="resumo-fatura-direita">
+                            <span
+                              className="resumo-fatura-valor"
+                              style={{ color: info.color }}
+                            >
+                              {formatCurrencyBRL(userSaldoAtual)}
+                            </span>
+                            <button
+                              type="button"
+                              className="button--sm button--ghost"
+                              onClick={() => setInfoDialog("saldo_acumulado")}
+                            >
+                              info
+                            </button>
+                          </span>
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
 
@@ -2943,6 +3319,368 @@ function App() {
                     Recorrentes
                   </button>
                 </div>
+
+                {recurringMessage && (
+                  <div className="success mt-2">{recurringMessage}</div>
+                )}
+
+                <div className="user-section">
+                  <SectionHeader
+                    title="Gastos recorrentes"
+                    subtitle="Cadastre modelos para repetir automaticamente nos próximos ciclos."
+                  />
+
+                  {userRecurringError && (
+                    <div className="error mt-2">{userRecurringError}</div>
+                  )}
+
+                  {userRecurringLoading ? (
+                    <p className="section-subtitle">Carregando recorrentes...</p>
+                  ) : userRecurringGastos.length === 0 ? (
+                    <p className="section-subtitle">
+                      Nenhum gasto recorrente cadastrado.
+                    </p>
+                  ) : (
+                    <ul className="gastos-list">
+                      {userRecurringGastos.map((item: any) => (
+                        <li key={String(item.id || "")} className="gasto-item">
+                          <div className="gasto-textos">
+                            <div className="gasto-descricao">
+                              {String(item.descricao || "(sem descrição)")}
+                            </div>
+                            <div className="gasto-meta">
+                              <span>
+                                {String(item.categoria || "").trim() ||
+                                  "Sem categoria"}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="gasto-acoes">
+                            <div className="gasto-valor">
+                              {formatCurrencyBRL(Number(item.valor_total || 0))}
+                            </div>
+                            <button
+                              type="button"
+                              disabled={saving}
+                              onClick={() => handleSelectRecurring(item)}
+                            >
+                              Editar
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+
+                  <div className="button-row mt-2">
+                    <button
+                      type="button"
+                      disabled={saving}
+                      onClick={() => {
+                        setSelectedRecurringId(null);
+                        setRecurringDescricao("");
+                        setRecurringValor("");
+                        setRecurringCategoria("");
+                        setUserActiveForm("recorrente");
+                      }}
+                    >
+                      Novo recorrente
+                    </button>
+                  </div>
+                </div>
+
+                <div className="user-section">
+                  <SectionHeader
+                    title="Meus gastos"
+                    subtitle="Últimos gastos ativos registrados para o seu cartão."
+                  />
+                  {userLancamentosError && (
+                    <div className="error mt-2">{userLancamentosError}</div>
+                  )}
+                  {userLancamentosLoading ? (
+                    <p className="section-subtitle">Carregando seus gastos...</p>
+                  ) : (
+                    <>
+                      {(() => {
+                        const filtered = userSelectedCycle
+                          ? userGastosList.filter((g: any) =>
+                              gastoPertenceAoCiclo(g, userSelectedCycle)
+                            )
+                          : userGastosList;
+
+                        if (filtered.length === 0) {
+                          return (
+                            <p className="section-subtitle">Nenhum gasto encontrado.</p>
+                          );
+                        }
+
+                        const limit = 15;
+                        const listToShow = userShowAllGastos
+                          ? filtered
+                          : filtered.slice(0, limit);
+
+                        return (
+                          <>
+                            <p className="section-subtitle">
+                              {filtered.length} gasto(s)
+                              {userSelectedCycle ? " neste ciclo" : ""}.
+                            </p>
+                            <ul className="gastos-list">
+                              {listToShow.map((g: any) => (
+                                <li key={String(g.id || "")} className="gasto-item">
+                                  <div className="gasto-textos">
+                                    <div className="gasto-descricao">
+                                      {String(g.descricao || "(sem descrição)")}
+                                    </div>
+                                    <div className="gasto-meta">
+                                      <span>{formatDateIsoToBR(g.data_compra)}</span>
+                                      <span>•</span>
+                                      <span>
+                                        {String(g.categoria || "").trim() ||
+                                          "Sem categoria"}
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <div className="gasto-acoes">
+                                    <div className="gasto-valor">
+                                      {formatCurrencyBRL(Number(g.valor_total || 0))}
+                                    </div>
+                                    <button
+                                      type="button"
+                                      disabled={saving}
+                                      onClick={() => handleSelectUserGastoForEdit(g)}
+                                    >
+                                      Editar
+                                    </button>
+                                  </div>
+                                </li>
+                              ))}
+                            </ul>
+
+                            {filtered.length > limit && (
+                              <div className="button-row mt-2">
+                                <button
+                                  type="button"
+                                  className="button--sm button--ghost"
+                                  onClick={() =>
+                                    setUserShowAllGastos((prev) => !prev)
+                                  }
+                                >
+                                  {userShowAllGastos
+                                    ? "Mostrar menos"
+                                    : "Mostrar tudo"}
+                                </button>
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </>
+                  )}
+                </div>
+
+                <div className="user-section">
+                  <SectionHeader
+                    title="Meus pagamentos"
+                    subtitle="Pagamentos registrados (usados para abater o saldo)."
+                  />
+                  {userLancamentosError && (
+                    <div className="error mt-2">{userLancamentosError}</div>
+                  )}
+                  {userLancamentosLoading ? (
+                    <p className="section-subtitle">Carregando seus pagamentos...</p>
+                  ) : (
+                    <>
+                      {(() => {
+                        const filtered = userSelectedCycle
+                          ? userPagamentosList.filter(
+                              (p: any) =>
+                                getCycleFromIsoDate(p.data_pagamento) ===
+                                userSelectedCycle
+                            )
+                          : userPagamentosList;
+
+                        if (filtered.length === 0) {
+                          return (
+                            <p className="section-subtitle">Nenhum pagamento encontrado.</p>
+                          );
+                        }
+
+                        const limit = 15;
+                        const listToShow = userShowAllPagamentos
+                          ? filtered
+                          : filtered.slice(0, limit);
+
+                        return (
+                          <>
+                            <p className="section-subtitle">
+                              {filtered.length} pagamento(s)
+                              {userSelectedCycle ? " neste ciclo" : ""}.
+                            </p>
+                            <ul className="admin-pagamentos-list">
+                              {listToShow.map((p: any) => (
+                                <li
+                                  key={String(p.id || "")}
+                                  className="admin-pagamento-item"
+                                >
+                                  <div className="admin-pagamento-textos">
+                                    <div className="admin-pagamento-descricao">
+                                      {String(p.descricao || "Pagamento")}
+                                    </div>
+                                    <div className="admin-pagamento-meta">
+                                      <span>{formatDateIsoToBR(p.data_pagamento)}</span>
+                                    </div>
+                                  </div>
+                                  <div className="gasto-acoes">
+                                    <div className="admin-pagamento-valor">
+                                      {formatCurrencyBRL(Number(p.valor || 0))}
+                                    </div>
+                                    <button
+                                      type="button"
+                                      disabled={saving}
+                                      onClick={() => handleSelectUserPagamentoForEdit(p)}
+                                    >
+                                      Editar
+                                    </button>
+                                  </div>
+                                </li>
+                              ))}
+                            </ul>
+
+                            {filtered.length > limit && (
+                              <div className="button-row mt-2">
+                                <button
+                                  type="button"
+                                  className="button--sm button--ghost"
+                                  onClick={() =>
+                                    setUserShowAllPagamentos((prev) => !prev)
+                                  }
+                                >
+                                  {userShowAllPagamentos
+                                    ? "Mostrar menos"
+                                    : "Mostrar tudo"}
+                                </button>
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </>
+                  )}
+                </div>
+
+                <div className="user-section user-extrato-wrap">
+                  <SectionHeader
+                    title="Extrato do ciclo"
+                    subtitle="Lançamentos consolidados (parcelas e pagamentos) do ciclo selecionado."
+                  />
+
+                  {userCategoriasResumo.length > 0 && (
+                    <div className="subcard user-categorias-card">
+                      <div className="subcard-title">Resumo por categoria</div>
+                      <div className="user-categorias-rows">
+                        {userCategoriasResumo.slice(0, 6).map(([cat, total]) => (
+                          <div key={cat} className="user-categorias-row">
+                            <span>{cat}</span>
+                            <span className="user-categorias-total">
+                              {formatCurrencyBRL(total)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                      {userCategoriasResumo.length > 6 && (
+                        <p className="section-subtitle mt-1">
+                          Mostrando as 6 categorias com maior gasto neste ciclo.
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="user-extrato-filters">
+                    <button
+                      type="button"
+                      className={
+                        "user-extrato-filter-button" +
+                        (userExtratoFilter === "all"
+                          ? " user-extrato-filter-button--active"
+                          : "")
+                      }
+                      onClick={() => setUserExtratoFilter("all")}
+                    >
+                      Tudo
+                    </button>
+                    <button
+                      type="button"
+                      className={
+                        "user-extrato-filter-button" +
+                        (userExtratoFilter === "gastos"
+                          ? " user-extrato-filter-button--active"
+                          : "")
+                      }
+                      onClick={() => setUserExtratoFilter("gastos")}
+                    >
+                      Gastos
+                    </button>
+                    <button
+                      type="button"
+                      className={
+                        "user-extrato-filter-button" +
+                        (userExtratoFilter === "pagamentos"
+                          ? " user-extrato-filter-button--active"
+                          : "")
+                      }
+                      onClick={() => setUserExtratoFilter("pagamentos")}
+                    >
+                      Pagamentos
+                    </button>
+                  </div>
+
+                  <div className="section-title">{userExtratoTitulo}</div>
+                  {userExtratoHasItens ? (
+                    <ul className="gastos-list">
+                      {userExtratoItensToShow.map((item: any, idx: number) => {
+                        const tipoLower = String(item?.tipo || "").toLowerCase();
+                        const isPagamento =
+                          tipoLower === "pagamento" || tipoLower === "pagamentos";
+                        const valor = Number(item?.valor || 0);
+                        const valorColor = isPagamento ? "#4ade80" : "#facc15";
+                        return (
+                          <li key={`${String(item?.data || "")}_${idx}`} className="user-extrato-item">
+                            <div className="user-extrato-textos">
+                              <div className="user-extrato-descricao">
+                                {String(item?.descricao || "(sem descrição)")}
+                              </div>
+                              <div className="user-extrato-meta">
+                                <span>{formatDateIsoToBR(item?.data)}</span>
+                                <span>•</span>
+                                <span>
+                                  {isPagamento ? "Pagamento" : "Gasto/Parcela"}
+                                </span>
+                              </div>
+                            </div>
+                            <div className="user-extrato-valor" style={{ color: valorColor }}>
+                              {formatCurrencyBRL(valor)}
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  ) : (
+                    <p className="section-subtitle">Nenhum lançamento encontrado neste ciclo.</p>
+                  )}
+
+                  {userExtratoFilteredItens.length > 10 && (
+                    <div className="button-row mt-2">
+                      <button
+                        type="button"
+                        className="button--sm button--ghost"
+                        onClick={() => setUserShowAllExtrato((prev) => !prev)}
+                      >
+                        {userShowAllExtrato ? "Mostrar menos" : "Mostrar tudo"}
+                      </button>
+                    </div>
+                  )}
+                </div>
               </>
             )}
           </section>
@@ -2954,6 +3692,206 @@ function App() {
               title="Painel administrativo"
               subtitle="Busque um usuário para visualizar sua fatura, lançamentos e atualizar seus dados."
             />
+
+            <div className="subcard">
+              <div className="subcard-title">Solicitações de acesso</div>
+              <p className="section-subtitle section-subtitle--tight">
+                Pedidos enviados pelo mini app (filtre por status e aprove em 1 toque).
+              </p>
+
+              <div className="user-extrato-filters">
+                <button
+                  type="button"
+                  className={
+                    "user-extrato-filter-button" +
+                    (adminAccessRequestsFilter === "pending"
+                      ? " user-extrato-filter-button--active"
+                      : "")
+                  }
+                  onClick={() => setAdminAccessRequestsFilter("pending")}
+                >
+                  Pendentes
+                </button>
+                <button
+                  type="button"
+                  className={
+                    "user-extrato-filter-button" +
+                    (adminAccessRequestsFilter === "approved"
+                      ? " user-extrato-filter-button--active"
+                      : "")
+                  }
+                  onClick={() => setAdminAccessRequestsFilter("approved")}
+                >
+                  Aprovadas
+                </button>
+                <button
+                  type="button"
+                  className={
+                    "user-extrato-filter-button" +
+                    (adminAccessRequestsFilter === "all"
+                      ? " user-extrato-filter-button--active"
+                      : "")
+                  }
+                  onClick={() => setAdminAccessRequestsFilter("all")}
+                >
+                  Todas
+                </button>
+              </div>
+
+              <form
+                onSubmit={(e) => e.preventDefault()}
+                className="form"
+              >
+                <label>
+                  Buscar na lista:
+                  <input
+                    type="text"
+                    value={adminAccessRequestsSearch}
+                    onChange={(e) => setAdminAccessRequestsSearch(e.target.value)}
+                    placeholder="Nome, username ou ID"
+                  />
+                </label>
+              </form>
+
+              {adminAccessRequestsError && (
+                <div className="error mt-2">{adminAccessRequestsError}</div>
+              )}
+
+              {(() => {
+                if (adminAccessRequestsLoading) {
+                  return (
+                    <p className="section-subtitle">Carregando solicitações...</p>
+                  );
+                }
+
+                const term = adminAccessRequestsSearch.trim().toLowerCase();
+                const filtered = adminAccessRequests.filter((reqItem: any) => {
+                  if (!term) {
+                    return true;
+                  }
+                  const userId = String(reqItem?.user_id || "").toLowerCase();
+                  const userInfo = reqItem?.user;
+                  const name = String(userInfo?.name || "").toLowerCase();
+                  const username = String(userInfo?.username || "").toLowerCase();
+                  return (
+                    userId.includes(term) ||
+                    name.includes(term) ||
+                    username.includes(term)
+                  );
+                });
+
+                const statusLabel =
+                  adminAccessRequestsFilter === "pending"
+                    ? "pendente"
+                    : adminAccessRequestsFilter === "approved"
+                    ? "aprovada"
+                    : "";
+
+                if (filtered.length === 0) {
+                  return (
+                    <p className="section-subtitle">
+                      Nenhuma solicitação {statusLabel ? `${statusLabel}` : ""}
+                      {term ? " para este filtro/busca" : ""}.
+                    </p>
+                  );
+                }
+
+                return (
+                  <>
+                    <p className="section-subtitle">
+                      Mostrando {Math.min(filtered.length, 20)} de {filtered.length}
+                      {statusLabel ? ` ${statusLabel}` : ""}.
+                    </p>
+                    <ul className="gastos-list">
+                      {filtered.slice(0, 20).map((reqItem: any) => {
+                        const userId = String(reqItem?.user_id || "");
+                        const userInfo = reqItem?.user;
+                        const labelName = String(userInfo?.name || "").trim();
+                        const labelUsername = userInfo?.username
+                          ? `@${String(userInfo.username)}`
+                          : "";
+                        const solicitadoEm = reqItem?.solicitado_em
+                          ? formatDateTime(reqItem.solicitado_em)
+                          : "-";
+                        const status = String(reqItem?.status || "").toLowerCase();
+                        const isPending = status === "pending";
+
+                        return (
+                          <li key={userId} className="gasto-item">
+                            <div className="gasto-textos">
+                              <div className="gasto-descricao">
+                                {labelName || userId}
+                              </div>
+                              <div className="gasto-meta">
+                                <span>{userId}</span>
+                                {labelUsername && (
+                                  <>
+                                    <span>•</span>
+                                    <span>{labelUsername}</span>
+                                  </>
+                                )}
+                                <span>•</span>
+                                <span>Solicitado em {solicitadoEm}</span>
+                              </div>
+                            </div>
+                            <div className="gasto-acoes">
+                              <div className="button-row">
+                                <button
+                                  type="button"
+                                  className="button--sm button--ghost"
+                                  disabled={loading || saving}
+                                  onClick={() => {
+                                    setTargetUserId(userId);
+                                    void loadAdminUserDataById(userId);
+                                  }}
+                                >
+                                  Abrir
+                                </button>
+                                {isPending && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      className="button--sm"
+                                      disabled={saving}
+                                      onClick={() =>
+                                        void handleAdminApproveAccess(userId)
+                                      }
+                                    >
+                                      Aprovar
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="button--sm"
+                                      disabled={saving || loading}
+                                      onClick={() =>
+                                        void handleAdminApproveAccess(userId, true)
+                                      }
+                                    >
+                                      Aprovar e abrir
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </>
+                );
+              })()}
+
+              <div className="button-row mt-2">
+                <button
+                  type="button"
+                  className="button--sm button--ghost"
+                  disabled={adminAccessRequestsLoading}
+                  onClick={() => setAdminAccessRequestsReloadToken((t) => t + 1)}
+                >
+                  Atualizar lista
+                </button>
+              </div>
+            </div>
           </section>
         )}
 
@@ -3084,6 +4022,58 @@ function App() {
                   <div className="admin-profile-value">
                     {userDetails.ativo === false ? "Inativo" : "Ativo"} — {" "}
                     {userDetails.autorizado ? "Acesso liberado" : "Aguardando liberação"}
+                  </div>
+                </div>
+
+                <div className="admin-profile-field">
+                  <div className="admin-profile-label">Solicitação de acesso</div>
+                  <div className="admin-profile-value">
+                    {(() => {
+                      const solicit = userDetails.solicitacao_acesso;
+                      const statusRaw = String(solicit?.status || "").toLowerCase();
+                      const status = statusRaw || "none";
+
+                      if (status === "approved") {
+                        return (
+                          <div className="admin-access-request">
+                            <div className="admin-status--approved">
+                              Aprovada
+                            </div>
+                            <div className="admin-access-meta">
+                              {solicit?.aprovado_em
+                                ? `Aprovado em ${formatDateTime(
+                                    solicit.aprovado_em
+                                  )}`
+                                : ""}
+                              {solicit?.aprovado_por
+                                ? ` por ${String(solicit.aprovado_por)}`
+                                : ""}
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      if (status === "pending") {
+                        return (
+                          <div className="admin-access-request">
+                            <div className="admin-status--pending">Pendente</div>
+                            <div className="admin-access-meta">
+                              {solicit?.solicitado_em
+                                ? `Solicitado em ${formatDateTime(
+                                    solicit.solicitado_em
+                                  )}`
+                                : ""}
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <div className="admin-access-request">
+                          <div className="muted-text">Nenhuma solicitação</div>
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
               </div>

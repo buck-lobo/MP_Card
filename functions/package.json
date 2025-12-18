@@ -1,10 +1,10 @@
 {
   "name": "telegram-bot-functions",
   "description": "Telegram bot via webhook on Firebase Cloud Functions with Firestore.",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "main": "lib/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "node ../scripts/check-functions-lib.cjs",
     "lint": "echo \"no lint configured\"",
     "deploy": "firebase deploy --only functions",
     "serve": "firebase emulators:start --only functions"
