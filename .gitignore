@@ -5,3 +5,15 @@ saldo_data.json
 *.bkp
 firebase-credentials.json
 *copy.py
+
+.firebase/
+node_modules/
+dist/
+.DS_Store
+
+admin-webapp/node_modules/
+admin-webapp/dist/
+
+functions/node_modules/
+functions/lib/
+functions/lib2/
