@@ -6,6 +6,13 @@ saldo_data.json
 firebase-credentials.json
 *copy.py
 
+# Scripts locais (shell/prompt)
+*.sh
+*.ps1
+*.bat
+*.cmd
+*.bash
+
 .firebase/
 node_modules/
 dist/
