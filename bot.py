@@ -1758,13 +1758,13 @@ async def run_telegram_bot():
     global application
     if not BOT_TOKEN:
         logger.error("❌ ERRO: BOT_TOKEN não configurado!")
-        print("❌ ERRO: Configure o BOT_TOKEN no arquivo .env ou nas variáveis de ambiente do Render.")
+        print("❌ ERRO: Configure o BOT_TOKEN no arquivo .env ou nas variáveis de ambiente do Firebase Hosting/Functions.")
         print("📝 Obtenha seu token em: https://t.me/BotFather")
         return
     
     if not FIREBASE_PROJECT_ID:
         logger.error("❌ ERRO: FIREBASE_PROJECT_ID não configurado!")
-        print("❌ ERRO: Configure o FIREBASE_PROJECT_ID no arquivo .env ou nas variáveis de ambiente do Render.")
+        print("❌ ERRO: Configure o FIREBASE_PROJECT_ID no arquivo .env ou nas variáveis de ambiente definidas pelo Firebase.")
         print("🔥 Configure seu projeto Firebase em: https://console.firebase.google.com/")
         return
     
