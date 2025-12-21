@@ -4,12 +4,18 @@
 import asyncio
 import logging, os, re
 import time
+from collections import defaultdict, deque
+
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from enum import Enum
+from redis import Redis
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from telegram.request import HTTPXRequest
 from telegram.error import TimedOut, RetryAfter, NetworkError
+from pydantic import BaseModel, Field, ValidationError
+from typing import Optional
+from abc import ABC, abstractmethod
 
 # Importações do Firebase
 import firebase_admin
@@ -17,11 +23,12 @@ from firebase_admin import credentials, firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from config import (
-    BOT_TOKEN, ADMIN_ID,
+    BOT_TOKEN, ADMIN_ID, ADMIN_IDS,
+
     FIREBASE_PROJECT_ID, FIREBASE_TYPE, FIREBASE_PRIVATE_KEY_ID, FIREBASE_PRIVATE_KEY,
     FIREBASE_CLIENT_EMAIL, FIREBASE_CLIENT_ID, FIREBASE_AUTH_URI, FIREBASE_TOKEN_URI,
     FIREBASE_AUTH_PROVIDER_X509_CERT_URL, FIREBASE_CLIENT_X509_CERT_URL, FIREBASE_UNIVERSE_DOMAIN,
-    COLLECTION_USUARIOS, COLLECTION_GASTOS, COLLECTION_PAGAMENTOS, COLLECTION_CONFIGURACOES
+    COLLECTION_USUARIOS, COLLECTION_GASTOS, COLLECTION_PAGAMENTOS, COLLECTION_CONFIGURACOES, REDIS_URL
 )
 
 # --- Configuração segura de logging ---
@@ -158,13 +165,285 @@ ESTADO_AGUARDANDO_PAGAMENTO = "aguardando_pagamento"
 ESTADO_AGUARDANDO_CONSULTA_USUARIO = "aguardando_consulta_usuario"
 ESTADO_AGUARDANDO_EXTRATO_ADMIN = 91  # número alto para não colidir
 
+RATE_LIMIT_MAX_HITS = int(os.environ.get("BOT_RATE_LIMIT", "30"))
+RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("BOT_RATE_WINDOW", "60"))
+NAO_AUTORIZADO_MENSAGEM = (
+    "⚠️ <b>Seu acesso ainda não foi liberado.</b>\n\n"
+    "Abra o mini app do cartão e toque em \"Pedir liberação\" ou aguarde um administrador aprovar seu acesso."
+)
+
+# Constantes para strings duplicadas
+CANCELAR = "❌ Cancelar"
+MENU_PRINCIPAL_TITULO = "💳 <b>Menu Principal</b>\n\nEscolha uma opção abaixo:"
+VOLTAR = "🔙 Voltar"
+MENU = "🔙 Menu"
+VOLTAR_MENU_PRINCIPAL = "🔙 Menu Principal"
+ERRO_INTERNO = "❌ <b>Erro interno!</b>\n\n"
+ACESSO_NEGADO = "❌ <b>Acesso negado!</b>\n\n🔒 Apenas administradores podem "
+OPERACAO_CANCELADA = "❌ <b>Operação cancelada.</b>\n\n💳 <b>Menu Principal</b>\n\nEscolha uma opção abaixo:"
+AGUARDANDO_MENSAGEM = "✏️ <b>Aguardando sua mensagem...</b>"
+DATA_FORMAT = "%d/%m/%y"
+
+ADICIONAR_GASTO_FORMATO = (
+    "Digite as informações do gasto no formato:\n"
+    "<code>&lt;descrição&gt; &lt;valor&gt; [parcelas]</code>\n\n"
+    "<b>Exemplos:</b>\n"
+    "• <code>Almoço 25.50</code> - Gasto à vista\n"
+    "• <code>Notebook 1200.00 12</code> - 12 parcelas de R$ 100,00\n"
+    "• <code>Supermercado 89.90 1</code> - À vista (1 parcela)\n\n"
+    "💡 <b>Dica:</b> Se não informar parcelas, será considerado à vista (1 parcela).\n\n"
+)
+
+ADICIONAR_PAGAMENTO_FORMATO = (
+    "Digite as informações do pagamento no formato:\n"
+    "<code>&lt;valor&gt; [descrição]</code>\n\n"
+    "<b>Exemplos:</b>\n"
+    "• <code>150.00</code> - Pagamento simples\n"
+    "• <code>200.50 Pagamento fatura março</code> - Com descrição\n\n"
+    "💡 <b>Dica:</b> O pagamento será abatido do seu saldo devedor.\n\n"
+)
+
+def is_admin(user_id: int | None) -> bool:
+    if user_id is None:
+        return False
+    try:
+        return int(user_id) in ADMIN_IDS
+    except (TypeError, ValueError):
+        return False
+
+class RateLimiter:
+    def __init__(self, max_hits: int, window_seconds: int):
+        self.max_hits = max_hits
+        self.window = window_seconds
+        self.hits: dict[int, deque[float]] = defaultdict(deque)
+
+    def allow(self, key: int) -> bool:
+        now = time.monotonic()
+        queue = self.hits[key]
+        while queue and now - queue[0] > self.window:
+            queue.popleft()
+        queue.append(now)
+        return len(queue) <= self.max_hits
+
+def sanitize_text(value: str, max_length: int = 120) -> str:
+    if not value:
+        return ""
+    cleaned = re.sub(r"[<>]", "", value.strip())
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    if len(cleaned) > max_length:
+        cleaned = cleaned[:max_length].rstrip()
+    return cleaned
+
+rate_limiter = RateLimiter(RATE_LIMIT_MAX_HITS, RATE_LIMIT_WINDOW_SECONDS)
 application = None
+
+async def _responder(update: Update, texto: str):
+    if update.message:
+        await update.message.reply_text(texto, parse_mode="HTML")
+    elif update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(texto, parse_mode="HTML")
+
+
+async def negar_acesso(update: Update):
+    await _responder(update, NAO_AUTORIZADO_MENSAGEM)
+
+
+async def bloquear_rate_limit(update: Update, user_id: int | None) -> bool:
+    if user_id is None:
+        return True
+    if rate_limiter.allow(user_id):
+        return False
+    logger.warning(f"Rate limit exceeded by user {user_id}")
+    await _responder(
+        update,
+        "⏳ <b>Muitas solicitações.</b>\n\nAguarde alguns segundos antes de tentar novamente."
+    )
+    return True
+
+
+async def garantir_autorizacao(update: Update) -> bool:
+    user = update.effective_user
+    if user is None:
+        await negar_acesso(update)
+        return False
+    if cartao_bot.usuario_autorizado(user.id):
+        return True
+    logger.warning(f"Unauthorized access attempt by user {user.id}")
+    await negar_acesso(update)
+    return False
+
+
+class IUserRepository(ABC):
+    @abstractmethod
+    def registrar_usuario(self, user_id, user_name, username=None):
+        pass
+
+    @abstractmethod
+    def usuario_autorizado(self, user_id: int | None) -> bool:
+        pass
+
+    @abstractmethod
+    def listar_todos_usuarios(self):
+        pass
+
+    @abstractmethod
+    def buscar_usuario_por_nome_ou_username(self, termo_busca: str):
+        pass
+
+class IGastoRepository(ABC):
+    @abstractmethod
+    def adicionar_gasto(self, user_id, descricao, valor_total, parcelas=1):
+        pass
+
+    @abstractmethod
+    def obter_gastos_usuario(self, user_id):
+        pass
+
+class UserRepository(IUserRepository):
+    def __init__(self, db):
+        self.db = db
+
+    def registrar_usuario(self, user_id, user_name, username=None):
+        try:
+            user_ref = self.db.collection(COLLECTION_USUARIOS).document(str(user_id))
+            user_data = {
+                "name": user_name,
+                "username": username,
+                "last_seen": firestore.SERVER_TIMESTAMP,
+                "ativo": True,
+                "atualizado_em": firestore.SERVER_TIMESTAMP
+            }
+            user_doc = user_ref.get()
+            if user_doc.exists:
+                user_ref.update(user_data)
+            else:
+                user_data["criado_em"] = firestore.SERVER_TIMESTAMP
+                user_data["autorizado"] = True if is_admin(user_id) else False
+                user_ref.set(user_data)
+            logger.info(f"Usuário {user_id} registrado/atualizado no Firestore")
+        except Exception as e:
+            logger.error(f"Erro ao registrar usuário {user_id}: {e}")
+
+    def usuario_autorizado(self, user_id: int | None) -> bool:
+        if user_id is None:
+            return False
+        if is_admin(user_id):
+            return True
+        try:
+            snap = self.db.collection(COLLECTION_USUARIOS).document(str(user_id)).get()
+            data = snap.to_dict() or {}
+            return bool(data.get("autorizado"))
+        except Exception as exc:
+            logger.error(f"Erro ao verificar autorização do usuário {user_id}: {exc}")
+            return False
+
+    def listar_todos_usuarios(self):
+        try:
+            usuarios_ref = self.db.collection(COLLECTION_USUARIOS).where("ativo", "==", True)
+            usuarios = []
+            for doc in usuarios_ref.stream():
+                usuario = doc.to_dict()
+                usuario["id"] = doc.id
+                usuarios.append(usuario)
+            return usuarios
+        except Exception as e:
+            logger.error(f"Erro ao listar usuários: {e}")
+            return []
+
+    def buscar_usuario_por_nome_ou_username(self, termo_busca: str):
+        try:
+            usuarios = self.listar_todos_usuarios()
+            termo_lower = termo_busca.lower().replace('@', '')
+            for usuario in usuarios:
+                nome = usuario.get('name', '').lower()
+                username = usuario.get('username', '').lower()
+                if termo_lower in nome or termo_lower == username or termo_lower in username:
+                    return usuario
+            return None
+        except Exception as e:
+            logger.error(f"Erro ao buscar usuário: {e}")
+            return None
+
+
+class GastoRepository(IGastoRepository):
+    def __init__(self, db):
+        self.db = db
+
+    def adicionar_gasto(self, user_id, descricao, valor_total, parcelas=1):
+        try:
+            gasto_id = f"{user_id}_{int(time.time())}"
+            valor_total_decimal = Decimal(str(valor_total))
+            valor_parcela_decimal = valor_total_decimal / parcelas
+            agora = datetime.now()
+
+            gasto_data = {
+                "id": gasto_id,
+                "user_id": str(user_id),
+                "descricao": descricao,
+                "valor_total": float(valor_total_decimal),
+                "valor_parcela": float(valor_parcela_decimal),
+                "parcelas_total": parcelas,
+                "parcelas_pagas": 0,
+                "data_compra": agora,
+                "ativo": True,
+                "mes_inicio": agora.month,
+                "ano_inicio": agora.year,
+                "criado_em": firestore.SERVER_TIMESTAMP,
+                "atualizado_em": firestore.SERVER_TIMESTAMP
+            }
+            gasto_ref = self.db.collection(COLLECTION_GASTOS).document(gasto_id)
+            gasto_ref.set(gasto_data)
+            logger.info(f"Gasto {gasto_id} adicionado ao Firestore")
+            return gasto_id
+        except Exception as e:
+            logger.error(f"Erro ao adicionar gasto: {e}")
+            raise
+
+    def obter_gastos_usuario(self, user_id):
+        """Obtém todos os gastos de um usuário do Firestore"""
+        user_id_str = str(user_id)
+        gastos_usuario = []
+        try:
+            gastos_query = self.db.collection(COLLECTION_GASTOS).where(
+                filter=FieldFilter("user_id", "==", user_id_str)
+            ).where(
+                filter=FieldFilter("ativo", "==", True)
+            ).order_by("data_compra", direction=firestore.Query.DESCENDING)
+            
+            for doc in gastos_query.stream():
+                gasto = self._float_para_decimal(doc.to_dict())
+                if isinstance(gasto.get("data_compra"), datetime):
+                    gasto["data_compra"] = gasto["data_compra"].isoformat()
+                gastos_usuario.append(gasto)
+            return gastos_usuario
+        except Exception as e:
+            logger.error(f"Erro ao obter gastos do usuário {user_id}: {e}")
+            return []
+
+    def _float_para_decimal(self, obj):
+        if isinstance(obj, (int, float)) and not isinstance(obj, bool):
+            return Decimal(str(obj))
+        elif isinstance(obj, dict):
+            return {key: self._float_para_decimal(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [self._float_para_decimal(item) for item in obj]
+        return obj
+
 
 class FirebaseCartaoCreditoBot:
     def __init__(self):
         self.db = self._inicializar_firebase()
         self._inicializar_configuracoes()
         self.fatura_manager = Fatura()
+        self.user_repo = UserRepository(self.db)
+        self.gasto_repo = GastoRepository(self.db)
+        self.redis_client = None
+        if REDIS_URL:
+            try:
+                self.redis_client = Redis.from_url(REDIS_URL)
+            except Exception as e:
+                logging.warning(f"Redis não disponível: {e}")
 
     def _inicializar_firebase(self):
         try:
@@ -244,10 +523,24 @@ class FirebaseCartaoCreditoBot:
                 user_ref.update(user_data)
             else:
                 user_data["criado_em"] = firestore.SERVER_TIMESTAMP
+                user_data["autorizado"] = True if is_admin(user_id) else False
                 user_ref.set(user_data)
             logger.info(f"Usuário {user_id} registrado/atualizado no Firestore")
         except Exception as e:
             logger.error(f"Erro ao registrar usuário {user_id}: {e}")
+
+    def usuario_autorizado(self, user_id: int | None) -> bool:
+        if user_id is None:
+            return False
+        if is_admin(user_id):
+            return True
+        try:
+            snap = self.db.collection(COLLECTION_USUARIOS).document(str(user_id)).get()
+            data = snap.to_dict() or {}
+            return bool(data.get("autorizado"))
+        except Exception as exc:
+            logger.error(f"Erro ao verificar autorização do usuário {user_id}: {exc}")
+            return False
     
     def adicionar_gasto(self, user_id, descricao, valor_total, parcelas=1):
         try:
@@ -374,6 +667,15 @@ class FirebaseCartaoCreditoBot:
 
     
     def calcular_saldo_usuario(self, user_id: int):
+        key = f"saldo:{user_id}"
+        if self.redis_client:
+            try:
+                cached = self.redis_client.get(key)
+                if cached:
+                    return Decimal(cached.decode())
+            except Exception:
+                pass
+        
         user_id_str = str(user_id)
         try:
             total_gastos_devidos = Decimal('0')
@@ -400,7 +702,13 @@ class FirebaseCartaoCreditoBot:
                 pagamento_dict = self._float_para_decimal(pagamento_doc.to_dict())
                 total_pagamentos += pagamento_dict["valor"]
 
-            return (total_gastos_devidos - total_pagamentos).quantize(Decimal("0.01"))
+            saldo = (total_gastos_devidos - total_pagamentos).quantize(Decimal("0.01"))
+            if self.redis_client:
+                try:
+                    self.redis_client.set(key, str(saldo), ex=3600)
+                except Exception:
+                    pass
+            return saldo
         except Exception as e:
             logger.error(f"Erro ao calcular saldo do usuário {user_id}: {e}")
             return Decimal('0')
@@ -800,6 +1108,10 @@ async def configurar_menu_comandos(application):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    if await bloquear_rate_limit(update, user.id):
+        return
+    if not await garantir_autorizacao(update):
+        return
     context.user_data.clear()
     context.user_data['estado'] = ESTADO_NORMAL
     cartao_bot.registrar_usuario(user.id, user.first_name, user.username)
@@ -830,11 +1142,15 @@ Use o menu abaixo para navegar:
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    if await bloquear_rate_limit(update, user.id):
+        return
+    if not await garantir_autorizacao(update):
+        return
     context.user_data.clear()
     context.user_data['estado'] = ESTADO_NORMAL
     cartao_bot.registrar_usuario(user.id, user.first_name, user.username)
     keyboard = criar_menu_principal(user.id)
-    await update.message.reply_text("💳 <b>Menu Principal</b>\n\nEscolha uma opção abaixo:", reply_markup=keyboard, parse_mode="HTML")
+    await update.message.reply_text(MENU_PRINCIPAL_TITULO, reply_markup=keyboard, parse_mode="HTML")
 
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -842,15 +1158,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
     user_name = query.from_user.first_name
-    data = query.data    
-    await query.answer()    
+    if await bloquear_rate_limit(update, user_id):
+        return
+    if not await garantir_autorizacao(update):
+        return
+    data = query.data
+    await query.answer()
     cartao_bot.registrar_usuario(user_id, user_name, query.from_user.username)
     
     if data == "menu_principal":
         context.user_data['estado'] = ESTADO_NORMAL
         keyboard = criar_menu_principal(user_id)
         await query.edit_message_text(
-            "💳 <b>Menu Principal</b>\n\nEscolha uma opção abaixo:",
+            MENU_PRINCIPAL_TITULO,
             reply_markup=keyboard,
             parse_mode="HTML"
         )
@@ -859,7 +1179,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['estado'] = ESTADO_NORMAL
         keyboard = criar_menu_principal(user_id)
         await query.edit_message_text(
-            "❌ <b>Operação cancelada.</b>\n\n💳 <b>Menu Principal</b>\n\nEscolha uma opção abaixo:",
+            OPERACAO_CANCELADA,
             reply_markup=keyboard,
             parse_mode="HTML"
         )
@@ -888,14 +1208,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = criar_botao_cancelar()
         
         await query.edit_message_text(
-            "💰 <b>Registrar Pagamento</b>\n\n"
-            "Digite as informações do pagamento no formato:\n"
-            "<code>&lt;valor&gt; [descrição]</code>\n\n"
-            "<b>Exemplos:</b>\n"
-            "• <code>150.00</code> - Pagamento simples\n"
-            "• <code>200.50 Pagamento fatura março</code> - Com descrição\n\n"
-            "💡 <b>Dica:</b> O pagamento será abatido do seu saldo devedor.\n\n"
-            "✏️ <b>Aguardando sua mensagem...</b>",
+            "💰 <b>Registrar Pagamento</b>\n\n" +
+            "Digite as informações do pagamento no formato:\n" +
+            "<code>&lt;valor&gt; [descrição]</code>\n\n" +
+            "<b>Exemplos:</b>\n" +
+            "• <code>150.00</code> - Pagamento simples\n" +
+            "• <code>200.50 Pagamento fatura março</code> - Com descrição\n\n" +
+            "💡 <b>Dica:</b> O pagamento será abatido do seu saldo devedor.\n\n" +
+            AGUARDANDO_MENSAGEM,
             reply_markup=keyboard,
             parse_mode="HTML"
         )
@@ -903,9 +1223,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_consultar_usuario":
         if user_id != ADMIN_ID:
             await query.edit_message_text(
-                "❌ <b>Acesso negado!</b>\n\n🔒 Apenas administradores podem consultar usuários.",
+                ACESSO_NEGADO + "consultar usuários.",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 Voltar", callback_data="menu_principal")
+                    InlineKeyboardButton(VOLTAR, callback_data="menu_principal")
                 ]]),
                 parse_mode="HTML"
             )
@@ -914,14 +1234,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['estado'] = ESTADO_AGUARDANDO_CONSULTA_USUARIO
         keyboard = criar_botao_cancelar()
         
+        text = """🔍 <b>Consultar Usuário - Administrador</b>\n\nDigite o nome ou username do usuário que deseja consultar:\n\n<b>Exemplos:</b>\n• `João`\n• `@maria`\n• `pedro123`\n\n""" + AGUARDANDO_MENSAGEM
+        
         await query.edit_message_text(
-            "🔍 <b>Consultar Usuário - Administrador</b>\n\n"
-            "Digite o nome ou username do usuário que deseja consultar:\n\n"
-            "<b>Exemplos:</b>\n"
-            "• `João`\n"
-            "• `@maria`\n"
-            "• `pedro123`\n\n"
-            "✏️ <b>Aguardando sua mensagem...</b>",
+            text,
             reply_markup=keyboard,
             parse_mode="HTML"
         )
@@ -1037,9 +1353,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_relatorio_geral":
         if user_id != ADMIN_ID:
             await query.edit_message_text(
-                "❌ <b>Acesso negado!</b>\n\n🔒 Apenas administradores podem acessar relatórios gerais.",
+                ACESSO_NEGADO + "acessar relatórios gerais.",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 Voltar", callback_data="menu_principal")
+                    InlineKeyboardButton(VOLTAR, callback_data="menu_principal")
                 ]]),
                 parse_mode="HTML"
             )
@@ -1169,10 +1485,22 @@ async def processar_mensagem_texto(update: Update, context: ContextTypes.DEFAULT
         # Estado normal - mostrar menu
         keyboard = criar_menu_principal(user_id)
         await update.message.reply_text(
-            "💳 <b>Menu Principal</b>\n\nEscolha uma opção abaixo:",
+            MENU_PRINCIPAL_TITULO,
             reply_markup=keyboard,
             parse_mode="HTML"
         )
+
+from pydantic import BaseModel, validator, Field
+from typing import Optional
+
+class GastoInput(BaseModel):
+    descricao: str = Field(..., max_length=120, description="Descrição do gasto")
+    valor: float = Field(..., gt=0, description="Valor do gasto em reais")
+    parcelas: int = Field(default=1, ge=1, le=60, description="Número de parcelas")
+
+class PagamentoInput(BaseModel):
+    valor: float = Field(..., gt=0, description="Valor do pagamento em reais")
+    descricao: Optional[str] = Field(None, max_length=120, description="Descrição opcional do pagamento")
 
 async def processar_gasto_otimizado(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
     """Processa gasto no modo otimizado"""
@@ -1180,7 +1508,6 @@ async def processar_gasto_otimizado(update: Update, context: ContextTypes.DEFAUL
     user_name = update.effective_user.first_name
     
     try:
-        # Dividir o texto em partes
         partes = texto.split()
         
         if len(partes) < 2:
@@ -1193,43 +1520,16 @@ async def processar_gasto_otimizado(update: Update, context: ContextTypes.DEFAUL
             )
             return
         
-        # Extrair valor (sempre o penúltimo ou último elemento)
-        valor_str = partes[-2] if len(partes) > 2 else partes[-1]
-        valor = Decimal(valor_str.replace(',', '.'))
-        
-        # Extrair parcelas (opcional, último elemento se for número)
-        parcelas = 1
-        if len(partes) > 2:
-            try:
-                parcelas = int(partes[-1])
-                if parcelas < 1:
-                    parcelas = 1
-                # Se conseguiu converter, a descrição vai até o antepenúltimo elemento
-                descricao = " ".join(partes[:-2])
-            except ValueError:
-                # Se não conseguiu converter, incluir na descrição
-                descricao = " ".join(partes[:-1])
-                parcelas = 1
+        # Usar validação pydantic
+        partes[0] = sanitize_text(partes[0])
+        if len(partes) == 2:
+            gasto_input = GastoInput(descricao=partes[0], valor=float(partes[1]))
         else:
-            # Apenas descrição e valor
-            descricao = " ".join(partes[:-1])
-            parcelas = 1
+            gasto_input = GastoInput(descricao=partes[0], valor=float(partes[1]), parcelas=int(partes[2]))
         
-        if valor <= 0:
-            await update.message.reply_text(
-                "❌ <b>Valor deve ser maior que zero!</b>",
-                reply_markup=criar_botao_cancelar(),
-                parse_mode="HTML"
-            )
-            return
-        
-        if parcelas > 60:
-            await update.message.reply_text(
-                "❌ <b>Máximo de 60 parcelas permitido!</b>",
-                reply_markup=criar_botao_cancelar(),
-                parse_mode="HTML"
-            )
-            return
+        descricao = gasto_input.descricao
+        valor = gasto_input.valor
+        parcelas = gasto_input.parcelas
         
         # Adicionar gasto
         gasto_id = cartao_bot.adicionar_gasto(user_id, descricao, valor, parcelas)
@@ -1264,14 +1564,6 @@ async def processar_gasto_otimizado(update: Update, context: ContextTypes.DEFAUL
         
         await update.message.reply_text(texto_confirmacao, reply_markup=keyboard, parse_mode="HTML")
         
-    except (InvalidOperation, ValueError):
-        await update.message.reply_text(
-            "❌ <b>Erro nos dados informados!</b>\n\n"
-            "Verifique se o valor está correto e as parcelas são um número inteiro.\n\n"
-            "<b>Formato:</b> <descrição> <valor> [parcelas]",
-            reply_markup=criar_botao_cancelar(),
-            parse_mode="HTML"
-        )
     except Exception as e:
         logger.error(f"Erro ao processar gasto: {e}")
         await update.message.reply_text(
@@ -1288,7 +1580,6 @@ async def processar_pagamento_otimizado(update: Update, context: ContextTypes.DE
     user_name = update.effective_user.first_name
     
     try:
-        # Dividir o texto em partes
         partes = texto.split()
         
         if len(partes) < 1:
@@ -1301,19 +1592,11 @@ async def processar_pagamento_otimizado(update: Update, context: ContextTypes.DE
             )
             return
         
-        # Extrair valor (primeiro elemento)
-        valor_str = partes[0]
-        valor = Decimal(valor_str.replace(',', '.'))
+        # Usar validação pydantic
+        pagamento_input = PagamentoInput(valor=float(partes[0]), descricao=sanitize_text(" ".join(partes[1:])) if len(partes) > 1 else None)
         
-        # Extrair descrição (resto dos elementos)
-        descricao = " ".join(partes[1:]) if len(partes) > 1 else "Pagamento"
-        
-        if valor <= 0:
-            await update.message.reply_text(
-                "❌ <b>Valor deve ser maior que zero!</b>",
-                reply_markup=criar_botao_cancelar()
-            )
-            return
+        valor = pagamento_input.valor
+        descricao = pagamento_input.descricao
         
         # Calcular saldo antes do pagamento
         saldo_antes = cartao_bot.calcular_saldo_usuario(user_id)
@@ -1355,16 +1638,6 @@ async def processar_pagamento_otimizado(update: Update, context: ContextTypes.DE
         
         await update.message.reply_text(texto_confirmacao, reply_markup=keyboard, parse_mode="HTML")
         
-    except (InvalidOperation, ValueError):
-        await update.message.reply_text(
-            "❌ <b>Valor inválido!</b>\n\n"
-            "Use apenas números.\n\n"
-            "<b>Exemplos válidos:</b>\n"
-            "• <code>100</code>\n"
-            "• <code>150.50</code>",
-            reply_markup=criar_botao_cancelar(),
-            parse_mode="HTML"
-        )
     except Exception as e:
         logger.error(f"Erro ao processar pagamento: {e}")
         await update.message.reply_text(

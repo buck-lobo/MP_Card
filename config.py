@@ -1,13 +1,19 @@
 import os
-# # Descomentar para testes locais
-# from dotenv import load_dotenv
+from dotenv import load_dotenv
 
-# # Carrega as variáveis do arquivo .env
-# load_dotenv()
+# Carrega as variáveis do arquivo .env
+load_dotenv()
 
 # Configurações do Bot Telegram
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID")) if os.environ.get("ADMIN_ID") else None
+ADMIN_IDS = [
+    int(admin_id.strip())
+    for admin_id in os.environ.get("ADMIN_IDS", "").split(",")
+    if admin_id.strip().isdigit()
+]
+if ADMIN_ID and ADMIN_ID not in ADMIN_IDS:
+    ADMIN_IDS.append(ADMIN_ID)
 
 # Configurações do Firebase (variáveis de ambiente individuais)
 FIREBASE_TYPE = os.environ.get("FIREBASE_TYPE")
@@ -21,6 +27,9 @@ FIREBASE_TOKEN_URI = os.environ.get("FIREBASE_TOKEN_URI")
 FIREBASE_AUTH_PROVIDER_X509_CERT_URL = os.environ.get("FIREBASE_AUTH_PROVIDER_X509_CERT_URL")
 FIREBASE_CLIENT_X509_CERT_URL = os.environ.get("FIREBASE_CLIENT_X509_CERT_URL")
 FIREBASE_UNIVERSE_DOMAIN = os.environ.get("FIREBASE_UNIVERSE_DOMAIN")
+
+# Configuração do Redis
+REDIS_URL = os.environ.get('REDIS_URL')
 
 # Configurações das coleções no Firestore
 COLLECTION_USUARIOS = "usuarios"

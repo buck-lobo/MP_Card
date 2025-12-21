@@ -8,6 +8,7 @@ import {
   obterExtratoConsumoUsuario,
   calcularSaldoUsuarioAteMes,
 } from "./telegram/handlers";
+import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
 
 declare function setWebAppCors(res: Response): void;
 declare function parseBool(value: unknown): boolean | null;
@@ -24,9 +25,18 @@ declare function getWebAppUserContext(
   userRecord?: any;
 } | null>;
 
-function getBotToken(): string {
+const secretClient = new SecretManagerServiceClient();
+
+async function getSecret(name: string): Promise<string> {
+  const [version] = await secretClient.accessSecretVersion({
+    name: `projects/${process.env.GCLOUD_PROJECT}/secrets/${name}/versions/latest`,
+  });
+  return version.payload?.data?.toString() || '';
+}
+
+async function getBotToken(): Promise<string> {
   const token =
-    process.env.TELEGRAM_BOT_TOKEN || functions.config().telegram?.bot_token;
+    process.env.TELEGRAM_BOT_TOKEN || await getSecret('telegram-bot-token');
   if (!token) {
     throw new Error("TELEGRAM_BOT_TOKEN não configurado.");
   }
