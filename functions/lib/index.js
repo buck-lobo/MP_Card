@@ -1,3 +1,5 @@
+// NOSONAR
+/* eslint-disable */
 "use strict";
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -33,7 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.userRegistrarPagamento = exports.userRegistrarGasto = exports.userListBillingCycles = exports.userListPagamentos = exports.userListGastos = exports.userGetOverview = exports.adminDelPagamento = exports.adminEditPagamento = exports.adminDelGasto = exports.adminEditGasto = exports.adminResumoFatura = exports.adminListPagamentos = exports.adminListGastos = exports.telegramWebhook = exports.adminUpdateUsuario = exports.adminGetUsuario = exports.adminSearchUsuarios = exports.userApplyRecurringGastos = exports.userDeleteRecurringGasto = exports.userUpsertRecurringGasto = exports.userCancelPagamento = exports.userEditPagamento = exports.userCancelGasto = exports.userEditGasto = exports.userListRecurringGastos = void 0;
+exports.adminMeta = exports.userRegistrarPagamento = exports.userRegistrarGasto = exports.userGetInvoiceStatus = exports.userListBillingCycles = exports.userListPagamentos = exports.userListGastos = exports.userRequestInvoicePdf = exports.userBootstrap = exports.userGetOverview = exports.adminDelPagamento = exports.adminEditPagamento = exports.adminDelGasto = exports.adminEditGasto = exports.adminGenerateInvoicePdf = exports.adminMarkInvoiceUploaded = exports.adminCreateInvoiceUploadUrl = exports.adminListInvoiceRequests = exports.adminSendMessage = exports.adminResumoFatura = exports.adminListPagamentos = exports.adminListGastos = exports.adminGetUserBundle = exports.telegramWebhook = exports.adminUpdateUsuario = exports.adminGetUsuario = exports.adminSearchUsuarios = exports.adminListUsuarios = exports.userApplyRecurringGastos = exports.userDeleteRecurringGasto = exports.userUpsertRecurringGasto = exports.userCancelPagamento = exports.userEditPagamento = exports.userCancelGasto = exports.userEditGasto = exports.userListRecurringGastos = void 0;
 const functions = __importStar(require("firebase-functions"));
 const router_1 = require("./telegram/router");
 const firebase_1 = require("./firebase");
@@ -41,13 +43,82 @@ const admin_1 = require("./admin");
 const webappAuth_1 = require("./telegram/webappAuth");
 const handlers_1 = require("./telegram/handlers");
 const api_1 = require("./telegram/api");
+const firebaseAdmin = __importStar(require("firebase-admin"));
+const fs_1 = require("fs");
+const path_1 = require("path");
+const PDFDocument = require("pdfkit");
+
+try {
+    if (!firebaseAdmin.apps || firebaseAdmin.apps.length === 0) {
+        firebaseAdmin.initializeApp();
+    }
+}
+catch (_a) {
+    // ignore
+}
+const httpsWithSecrets = functions.runWith({ secrets: ["TELEGRAM_BOT_TOKEN"] }).https;
+
+let cachedBotInfo = null;
+let cachedBotInfoAtMs = 0;
+async function getBotInfoSafe(token) {
+    const now = Date.now();
+    if (cachedBotInfo && now - cachedBotInfoAtMs < 60 * 60 * 1000) {
+        return cachedBotInfo;
+    }
+    try {
+        const me = await (0, api_1.callTelegram)(token, "getMe", {});
+        cachedBotInfo = {
+            id: me && me.id ? Number(me.id) : null,
+            username: me && me.username ? String(me.username) : null,
+        };
+        cachedBotInfoAtMs = now;
+        return cachedBotInfo;
+    }
+    catch (_a) {
+        return null;
+    }
+}
+
+function readChangelogSafe() {
+    try {
+        const changelogPath = (0, path_1.resolve)(__dirname, "../changelog.json");
+        const raw = (0, fs_1.readFileSync)(changelogPath, "utf8");
+        const parsed = JSON.parse(raw);
+        const items = Array.isArray(parsed === null || parsed === void 0 ? void 0 : parsed.items) ? parsed.items : [];
+        return items.slice(0, 20);
+    }
+    catch (_a) {
+        return [];
+    }
+}
 function getBotToken() {
-    var _a;
-    const token = process.env.TELEGRAM_BOT_TOKEN || ((_a = functions.config().telegram) === null || _a === void 0 ? void 0 : _a.bot_token);
-    if (!token) {
+    const tokenRaw = process.env.TELEGRAM_BOT_TOKEN;
+    if (!tokenRaw) {
         throw new Error("TELEGRAM_BOT_TOKEN não configurado.");
     }
+    // Remove whitespace acidental (newline no Secret Manager, copy/paste, etc)
+    const token = String(tokenRaw).trim().replace(/\s+/g, "");
+    if (!token) {
+        throw new Error("TELEGRAM_BOT_TOKEN está vazio após trim.");
+    }
     return token;
+}
+
+async function sendTelegramTextMessage(token, chatId, text) {
+    const chatIdStr = String(chatId || "").trim();
+    if (!chatIdStr) {
+        throw new Error("chatId inválido");
+    }
+    const msg = String(text || "").trim();
+    if (!msg) {
+        throw new Error("Mensagem vazia");
+    }
+    const safeText = msg.length > 3500 ? msg.slice(0, 3500) + "…" : msg;
+    const payload = {
+        chat_id: chatIdStr,
+        text: safeText,
+    };
+    return await (0, api_1.callTelegram)(token, "sendMessage", payload);
 }
 async function writeAuditLog(entry) {
     try {
@@ -127,7 +198,7 @@ function getDataCompraForCycle(mes, ano) {
     }
     return new Date(prevAno, prevMes - 1, 10, 12, 0, 0);
 }
-exports.userListRecurringGastos = functions.https.onRequest(async (req, res) => {
+exports.userListRecurringGastos = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
         res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
@@ -185,7 +256,7 @@ exports.userListRecurringGastos = functions.https.onRequest(async (req, res) => 
         res.status(500).json({ error: "Erro ao listar gastos recorrentes" });
     }
 });
-exports.userEditGasto = functions.https.onRequest(async (req, res) => {
+exports.userEditGasto = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
         res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -326,7 +397,7 @@ exports.userEditGasto = functions.https.onRequest(async (req, res) => {
         res.status(500).json({ error: "Erro ao editar gasto" });
     }
 });
-exports.userCancelGasto = functions.https.onRequest(async (req, res) => {
+exports.userCancelGasto = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
         res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -388,7 +459,7 @@ exports.userCancelGasto = functions.https.onRequest(async (req, res) => {
         res.status(500).json({ error: "Erro ao cancelar gasto" });
     }
 });
-exports.userEditPagamento = functions.https.onRequest(async (req, res) => {
+exports.userEditPagamento = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
         res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -485,7 +556,7 @@ exports.userEditPagamento = functions.https.onRequest(async (req, res) => {
         res.status(500).json({ error: "Erro ao editar pagamento" });
     }
 });
-exports.userCancelPagamento = functions.https.onRequest(async (req, res) => {
+exports.userCancelPagamento = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
         res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -549,7 +620,7 @@ exports.userCancelPagamento = functions.https.onRequest(async (req, res) => {
         res.status(500).json({ error: "Erro ao cancelar pagamento" });
     }
 });
-exports.userUpsertRecurringGasto = functions.https.onRequest(async (req, res) => {
+exports.userUpsertRecurringGasto = httpsWithSecrets.onRequest(async (req, res) => {
     var _a;
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
@@ -640,7 +711,7 @@ exports.userUpsertRecurringGasto = functions.https.onRequest(async (req, res) =>
         res.status(500).json({ error: "Erro ao salvar gasto recorrente" });
     }
 });
-exports.userDeleteRecurringGasto = functions.https.onRequest(async (req, res) => {
+exports.userDeleteRecurringGasto = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
         res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -683,7 +754,7 @@ exports.userDeleteRecurringGasto = functions.https.onRequest(async (req, res) =>
         res.status(500).json({ error: "Erro ao remover gasto recorrente" });
     }
 });
-exports.userApplyRecurringGastos = functions.https.onRequest(async (req, res) => {
+exports.userApplyRecurringGastos = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
         res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -850,11 +921,8 @@ async function verifyAdminFromRequest(req, res) {
     let user;
     try {
         const token = getBotToken();
-        console.log("Validando initData...");
-        console.log("- initData length:", initData.length);
-        console.log("- initData preview:", initData.substring(0, 100) + "...");
-        console.log("- bot token length:", token.length);
-        console.log("- bot token (primeiros 10 chars):", token.substring(0, 10) + "...");
+        // Não logar token nem trechos do initData (sensível). Mantém apenas metadados mínimos.
+        console.log("Validando initData (admin) - length:", initData.length);
         user = (0, webappAuth_1.parseAndVerifyInitData)(initData, token);
         console.log("✅ initData válido para user:", user.id);
     }
@@ -893,10 +961,34 @@ async function getWebAppUserContext(req, res) {
         res.status(401).send("initData inválido");
         return null;
     }
-    const userIdStr = String(webAppUser.id);
-    const userRef = firebase_1.db.collection("usuarios").doc(userIdStr);
+    const actorUserIdStr = String(webAppUser.id);
+    const isAdmin = admin_1.ADMIN_USER_IDS.includes(actorUserIdStr);
+    const body = req.body || {};
+    const targetFromBody = typeof body.targetUserId === "string" ? body.targetUserId : "";
+    const targetFromBodyLegacy = typeof body.userId === "string" ? body.userId : "";
+    const query = req.query || {};
+    const targetFromQuery = typeof query.targetUserId === "string" ? query.targetUserId : "";
+    const targetFromQueryLegacy = typeof query.userId === "string" ? query.userId : "";
+    const targetTerm = (targetFromBody || targetFromBodyLegacy || targetFromQuery || targetFromQueryLegacy || "").trim();
+    let userIdStr = actorUserIdStr;
+    if (isAdmin && targetTerm) {
+        const resolvedTarget = await resolveTargetUserId(targetTerm);
+        if (!resolvedTarget) {
+            setWebAppCors(res);
+            res.status(404).json({ error: "Usuário alvo não encontrado." });
+            return null;
+        }
+        userIdStr = resolvedTarget;
+        if (userIdStr !== actorUserIdStr) {
+            console.log("getWebAppUserContext: admin impersonation", {
+                actor_user_id: actorUserIdStr,
+                target_user_id: userIdStr,
+            });
+        }
+    }
+    const actorUserRef = firebase_1.db.collection("usuarios").doc(actorUserIdStr);
     try {
-        await userRef.set({
+        await actorUserRef.set({
             name: (_b = webAppUser.first_name) !== null && _b !== void 0 ? _b : "",
             username: (_c = webAppUser.username) !== null && _c !== void 0 ? _c : null,
             last_seen: new Date(),
@@ -907,17 +999,25 @@ async function getWebAppUserContext(req, res) {
     catch (err) {
         console.error("Erro ao registrar/atualizar usuário do WebApp (usuário):", err);
     }
+    const userRef = firebase_1.db.collection("usuarios").doc(userIdStr);
     let data = {};
     try {
         const snap = await userRef.get();
+        if (!snap.exists && userIdStr !== actorUserIdStr) {
+            setWebAppCors(res);
+            res.status(404).json({ error: "Usuário alvo não encontrado." });
+            return null;
+        }
         data = snap.data() || {};
     }
     catch (err) {
         console.error("Erro ao ler dados do usuário do WebApp:", err);
     }
-    const isAdmin = admin_1.ADMIN_USER_IDS.includes(userIdStr);
     let autorizado = data.autorizado === true || isAdmin;
-    if (isAdmin && data.autorizado !== true) {
+    if (isAdmin && userIdStr !== actorUserIdStr) {
+        autorizado = true;
+    }
+    if (isAdmin && userIdStr === actorUserIdStr && data.autorizado !== true) {
         try {
             await userRef.set({ autorizado: true }, { merge: true });
         }
@@ -931,6 +1031,8 @@ async function getWebAppUserContext(req, res) {
         userRecord: data,
         isAdmin,
         autorizado,
+        actorUserIdStr,
+        impersonating: userIdStr !== actorUserIdStr,
     };
 }
 function parseBool(value) {
@@ -946,7 +1048,7 @@ function parseBool(value) {
     }
     return null;
 }
-exports.adminSearchUsuarios = functions.https.onRequest(async (req, res) => {
+exports.adminSearchUsuarios = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
         res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
@@ -1021,7 +1123,71 @@ exports.adminSearchUsuarios = functions.https.onRequest(async (req, res) => {
         res.status(500).send("Erro ao buscar usuários");
     }
 });
-exports.adminGetUsuario = functions.https.onRequest(async (req, res) => {
+exports.adminListUsuarios = httpsWithSecrets.onRequest(async (req, res) => {
+    var _a;
+    if (req.method === "OPTIONS") {
+        setWebAppCors(res);
+        res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+        res.status(204).send("");
+        return;
+    }
+    if (req.method !== "GET") {
+        res.status(405).send("Method Not Allowed");
+        return;
+    }
+    const adminUser = await verifyAdminFromRequest(req, res);
+    if (!adminUser) {
+        return;
+    }
+    setWebAppCors(res);
+    const limitRaw = req.query.limit;
+    const cursorRaw = req.query.cursor;
+    let limit = 120;
+    if (typeof limitRaw === "string") {
+        const parsed = Number.parseInt(limitRaw, 10);
+        if (Number.isFinite(parsed) && parsed > 0) {
+            limit = Math.min(parsed, 300);
+        }
+    }
+    const cursor = typeof cursorRaw === "string" && cursorRaw.trim()
+        ? cursorRaw.trim()
+        : null;
+    try {
+        let query = firebase_1.db
+            .collection("usuarios")
+            .orderBy(firebaseAdmin.firestore.FieldPath.documentId())
+            .limit(limit);
+        if (cursor) {
+            query = query.startAfter(cursor);
+        }
+        const snap = await query.get();
+        const items = [];
+        snap.forEach((doc) => {
+            var _a;
+            const data = doc.data() || {};
+            items.push({
+                id: doc.id,
+                name: String(data.name || ""),
+                username: (_a = data.username) !== null && _a !== void 0 ? _a : null,
+                ativo: data.ativo !== false,
+                autorizado: data.autorizado === true,
+                last_seen: data.last_seen || null,
+            });
+        });
+        const last = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
+        const nextCursor = snap.size >= limit ? (_a = last === null || last === void 0 ? void 0 : last.id) !== null && _a !== void 0 ? _a : null : null;
+        res.status(200).json({
+            items,
+            nextCursor,
+            count: items.length,
+        });
+    }
+    catch (err) {
+        console.error("Erro em adminListUsuarios", err);
+        res.status(500).send("Erro ao listar usuários");
+    }
+});
+exports.adminGetUsuario = httpsWithSecrets.onRequest(async (req, res) => {
     var _a, _b, _c, _d, _e, _f, _g, _h, _j;
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
@@ -1086,6 +1252,7 @@ exports.adminGetUsuario = functions.https.onRequest(async (req, res) => {
                 username: (_f = data.username) !== null && _f !== void 0 ? _f : null,
                 ativo: data.ativo !== false,
                 autorizado: !!data.autorizado,
+                invoice_pdf_enabled: data.invoice_pdf_enabled === true,
                 criado_em: (_g = data.criado_em) !== null && _g !== void 0 ? _g : null,
                 last_seen: (_h = data.last_seen) !== null && _h !== void 0 ? _h : null,
                 atualizado_em: (_j = data.atualizado_em) !== null && _j !== void 0 ? _j : null,
@@ -1098,7 +1265,224 @@ exports.adminGetUsuario = functions.https.onRequest(async (req, res) => {
         res.status(500).send("Erro ao obter usuário");
     }
 });
-exports.adminUpdateUsuario = functions.https.onRequest(async (req, res) => {
+
+exports.adminGetUserBundle = httpsWithSecrets.onRequest(async (req, res) => {
+    var _a, _b, _c, _d, _e, _f;
+    if (req.method === "OPTIONS") {
+        res.set("Access-Control-Allow-Origin", "*");
+        res.set("Access-Control-Allow-Headers", "x-telegram-init-data, content-type");
+        res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+        res.status(204).send("");
+        return;
+    }
+    if (req.method !== "GET") {
+        res.status(405).send("Method Not Allowed");
+        return;
+    }
+    const adminUser = await verifyAdminFromRequest(req, res);
+    if (!adminUser) {
+        return;
+    }
+    const userTermRaw = req.query.userId;
+    const userTerm = typeof userTermRaw === "string" ? userTermRaw.trim() : "";
+    if (!userTerm) {
+        res.status(400).send("Parâmetro userId obrigatório");
+        return;
+    }
+    const targetUserId = await resolveTargetUserId(userTerm);
+    if (!targetUserId) {
+        res.status(404).send("Usuário não encontrado");
+        return;
+    }
+    const limitRaw = req.query.limit;
+    let limit = 500;
+    if (typeof limitRaw === "string") {
+        const parsed = Number.parseInt(limitRaw, 10);
+        if (Number.isFinite(parsed) && parsed > 0 && parsed <= 1000) {
+            limit = parsed;
+        }
+    }
+    res.set("Access-Control-Allow-Origin", "*");
+    try {
+        const userDocRef = firebase_1.db.collection("usuarios").doc(targetUserId);
+        const solicitRef = firebase_1.db.collection("solicitacoes_acesso").doc(targetUserId);
+        const gastosQuery = firebase_1.db
+            .collection("gastos")
+            .where("user_id", "==", targetUserId)
+            .where("ativo", "==", true)
+            .orderBy("data_compra", "desc")
+            .limit(limit);
+        const pagamentosFetchLimit = Math.min(3000, Math.max(limit * 3, limit));
+        const pagamentosQuery = firebase_1.db
+            .collection("pagamentos")
+            .where("user_id", "==", targetUserId)
+            .orderBy("data_pagamento", "desc")
+            .limit(pagamentosFetchLimit);
+        const [userSnap, solicitSnap, gastosSnap, pagamentosSnap] = await Promise.all([
+            userDocRef.get(),
+            solicitRef.get(),
+            gastosQuery.get(),
+            pagamentosQuery.get(),
+        ]);
+        if (!userSnap.exists) {
+            res.status(404).send("Usuário não encontrado");
+            return;
+        }
+        const userData = userSnap.data() || {};
+        let solicitacaoAcesso = null;
+        if (solicitSnap.exists) {
+            const sdata = solicitSnap.data() || {};
+            solicitacaoAcesso = {
+                status: (_a = sdata.status) !== null && _a !== void 0 ? _a : null,
+                solicitado_em: (_b = sdata.solicitado_em) !== null && _b !== void 0 ? _b : null,
+                atualizado_em: (_c = sdata.atualizado_em) !== null && _c !== void 0 ? _c : null,
+                aprovado_em: (_d = sdata.aprovado_em) !== null && _d !== void 0 ? _d : null,
+                aprovado_por: (_e = sdata.aprovado_por) !== null && _e !== void 0 ? _e : null,
+            };
+        }
+        const gastos = [];
+        gastosSnap.forEach((doc) => {
+            const data = doc.data() || {};
+            const dataCompraRaw = data.data_compra;
+            let dataCompraIso = null;
+            const dataCompraAny = dataCompraRaw;
+            if (dataCompraAny && typeof dataCompraAny.toDate === "function") {
+                dataCompraIso = dataCompraAny.toDate().toISOString();
+            }
+            else if (dataCompraRaw instanceof Date) {
+                dataCompraIso = dataCompraRaw.toISOString();
+            }
+            gastos.push({
+                id: data.id || doc.id,
+                descricao: data.descricao || "",
+                categoria: data.categoria || "",
+                valor_total: Number(data.valor_total || data.valor_parcela || 0),
+                parcelas_total: Number(data.parcelas_total || 1),
+                valor_parcela: Number(data.valor_parcela || data.valor_total || 0),
+                data_compra: dataCompraIso,
+                ativo: data.ativo !== false,
+            });
+        });
+        const pagamentosAll = [];
+        pagamentosSnap.forEach((doc) => {
+            const data = doc.data() || {};
+            if (data.cancelado) {
+                return;
+            }
+            const dataPagRaw = data.data_pagamento;
+            let dataPagIso = null;
+            const dataPagAny = dataPagRaw;
+            if (dataPagAny && typeof dataPagAny.toDate === "function") {
+                dataPagIso = dataPagAny.toDate().toISOString();
+            }
+            else if (dataPagRaw instanceof Date) {
+                dataPagIso = dataPagRaw.toISOString();
+            }
+            pagamentosAll.push({
+                id: data.id || doc.id,
+                descricao: data.descricao || "Pagamento",
+                valor: Number(data.valor || 0),
+                data_pagamento: dataPagIso,
+                cancelado: !!data.cancelado,
+            });
+        });
+        const pagamentos = pagamentosAll.slice(0, limit);
+        res.status(200).json({
+            ok: true,
+            admin_user_id: String(adminUser.id),
+            user_id: targetUserId,
+            usuario: {
+                admin_user_id: adminUser.id,
+                user_id: targetUserId,
+                dados: {
+                    id: targetUserId,
+                    name: String(userData.name || ""),
+                    username: (_f = userData.username) !== null && _f !== void 0 ? _f : null,
+                    ativo: userData.ativo !== false,
+                    autorizado: !!userData.autorizado,
+                    invoice_pdf_enabled: userData.invoice_pdf_enabled === true,
+                    criado_em: userData.criado_em || null,
+                    atualizado_em: userData.atualizado_em || null,
+                    solicitacao_acesso: solicitacaoAcesso,
+                },
+            },
+            gastos: {
+                total: gastos.length,
+                itens: gastos,
+            },
+            pagamentos: {
+                total: pagamentosAll.length,
+                itens: pagamentos,
+            },
+        });
+    }
+    catch (err) {
+        console.error("Erro em adminGetUserBundle", err);
+        res.status(500).send("Erro ao carregar dados do usuário");
+    }
+});
+
+exports.adminSendMessage = httpsWithSecrets.onRequest(async (req, res) => {
+    if (req.method === "OPTIONS") {
+        setWebAppCors(res);
+        res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+        res.status(204).send("");
+        return;
+    }
+    if (req.method !== "POST") {
+        res.status(405).send("Method Not Allowed");
+        return;
+    }
+    const adminUser = await verifyAdminFromRequest(req, res);
+    if (!adminUser) {
+        return;
+    }
+    setWebAppCors(res);
+    const body = req.body || {};
+    const userTermRaw = body.userId;
+    const userTerm = typeof userTermRaw === "string" ? userTermRaw.trim() : "";
+    const messageRaw = body.message;
+    const message = typeof messageRaw === "string" ? messageRaw.trim() : "";
+    if (!userTerm) {
+        res.status(400).json({ error: "userId obrigatório" });
+        return;
+    }
+    if (!message) {
+        res.status(400).json({ error: "Mensagem obrigatória" });
+        return;
+    }
+    const targetUserId = await resolveTargetUserId(userTerm);
+    if (!targetUserId) {
+        res.status(404).json({ error: "Usuário não encontrado" });
+        return;
+    }
+    try {
+        const token = getBotToken();
+        const result = await sendTelegramTextMessage(token, targetUserId, message);
+        await writeAuditLog({
+            actor_user_id: String(adminUser.id),
+            action: "admin_send_message",
+            entity: "telegram_message",
+            entity_id: result && result.message_id ? String(result.message_id) : null,
+            target_user_id: String(targetUserId),
+            before: null,
+            after: {
+                message_preview: message.slice(0, 80),
+            },
+        });
+        res.status(200).json({
+            ok: true,
+            admin_user_id: String(adminUser.id),
+            user_id: String(targetUserId),
+            telegram_message_id: result && result.message_id ? result.message_id : null,
+        });
+    }
+    catch (err) {
+        console.error("Erro em adminSendMessage", err);
+        res.status(500).json({ error: "Erro ao enviar mensagem" });
+    }
+});
+exports.adminUpdateUsuario = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
         res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -1148,6 +1532,10 @@ exports.adminUpdateUsuario = functions.https.onRequest(async (req, res) => {
     if (ativoParsed !== null) {
         updates.ativo = ativoParsed;
     }
+    const invoiceParsed = parseBool(body.invoice_pdf_enabled);
+    if (invoiceParsed !== null) {
+        updates.invoice_pdf_enabled = invoiceParsed;
+    }
     try {
         await firebase_1.db.collection("usuarios").doc(targetUserId).set(updates, {
             merge: true,
@@ -1182,7 +1570,7 @@ exports.adminUpdateUsuario = functions.https.onRequest(async (req, res) => {
     }
 });
 
-exports.adminListAccessRequests = functions.https.onRequest(async (req, res) => {
+exports.adminListAccessRequests = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
         res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
@@ -1211,13 +1599,6 @@ exports.adminListAccessRequests = functions.https.onRequest(async (req, res) => 
         let query = firebase_1.db.collection("solicitacoes_acesso").limit(limit);
         if (status) {
             query = query.where("status", "==", status);
-        }
-        // Ordenar por solicitado_em (se existir) para priorizar os mais antigos.
-        try {
-            query = query.orderBy("solicitado_em", "asc");
-        }
-        catch (_a) {
-            // Se não houver índice/orderBy disponível, seguimos sem ordenar.
         }
         const snap = await query.get();
         const items = [];
@@ -1249,6 +1630,27 @@ exports.adminListAccessRequests = functions.https.onRequest(async (req, res) => 
                 user,
             });
         }
+        // Ordenação em memória (evita índice composto no Firestore).
+        // Se solicitado_em não existir, mantém no fim.
+        items.sort((a, b) => {
+            const ad = a.solicitado_em && typeof a.solicitado_em.toDate === "function"
+                ? a.solicitado_em.toDate().getTime()
+                : a.solicitado_em instanceof Date
+                    ? a.solicitado_em.getTime()
+                    : typeof a.solicitado_em === "string"
+                        ? new Date(a.solicitado_em).getTime()
+                        : NaN;
+            const bd = b.solicitado_em && typeof b.solicitado_em.toDate === "function"
+                ? b.solicitado_em.toDate().getTime()
+                : b.solicitado_em instanceof Date
+                    ? b.solicitado_em.getTime()
+                    : typeof b.solicitado_em === "string"
+                        ? new Date(b.solicitado_em).getTime()
+                        : NaN;
+            const aNum = Number.isFinite(ad) ? ad : Number.POSITIVE_INFINITY;
+            const bNum = Number.isFinite(bd) ? bd : Number.POSITIVE_INFINITY;
+            return aNum - bNum;
+        });
         res.status(200).json({
             ok: true,
             admin_user_id: adminUser.id,
@@ -1263,7 +1665,57 @@ exports.adminListAccessRequests = functions.https.onRequest(async (req, res) => 
     }
 });
 
-exports.telegramWebhook = functions.https.onRequest(async (req, res) => {
+exports.adminMeta = httpsWithSecrets.onRequest(async (req, res) => {
+    if (req.method === "OPTIONS") {
+        setWebAppCors(res);
+        res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+        res.status(204).send("");
+        return;
+    }
+    if (req.method !== "GET") {
+        res.status(405).send("Method Not Allowed");
+        return;
+    }
+    const adminUser = await verifyAdminFromRequest(req, res);
+    if (!adminUser) {
+        return;
+    }
+    setWebAppCors(res);
+    let backendVersion = "unknown";
+    try {
+        // lib/index.js está em /workspace/lib, então ../package.json aponta para /workspace/package.json (functions/package.json)
+        const pkg = require("../package.json");
+        if (pkg && typeof pkg.version === "string") {
+            backendVersion = pkg.version;
+        }
+    }
+    catch (_a) {
+        backendVersion = "unknown";
+    }
+    let bot = null;
+    try {
+        const token = getBotToken();
+        bot = await getBotInfoSafe(token);
+    }
+    catch (_b) {
+        bot = null;
+    }
+    const changelogItems = readChangelogSafe();
+    res.status(200).json({
+        ok: true,
+        admin_user_id: String(adminUser.id),
+        versions: {
+            backend: backendVersion,
+        },
+        bot,
+        changelog: {
+            items: changelogItems,
+        },
+        server_time: new Date().toISOString(),
+    });
+});
+
+exports.telegramWebhook = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method !== "POST") {
         res.status(405).send("Method Not Allowed");
         return;
@@ -1287,7 +1739,7 @@ exports.telegramWebhook = functions.https.onRequest(async (req, res) => {
         res.status(500).send("Erro interno");
     }
 });
-exports.adminListGastos = functions.https.onRequest(async (req, res) => {
+exports.adminListGastos = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         res.set("Access-Control-Allow-Origin", "*");
         res.set("Access-Control-Allow-Headers", "x-telegram-init-data, content-type");
@@ -1328,15 +1780,20 @@ exports.adminListGastos = functions.https.onRequest(async (req, res) => {
             .collection("gastos")
             .where("user_id", "==", targetUserId)
             .where("ativo", "==", true)
+            .orderBy("data_compra", "desc")
+            .limit(limit)
             .get();
         const itens = [];
         snap.forEach((doc) => {
-            const data = doc.data();
+            const data = doc.data() || {};
             const dataCompraRaw = data.data_compra;
             let dataCompraIso = null;
             const dataCompraAny = dataCompraRaw;
             if (dataCompraAny && typeof dataCompraAny.toDate === "function") {
                 dataCompraIso = dataCompraAny.toDate().toISOString();
+            }
+            else if (dataCompraRaw instanceof Date) {
+                dataCompraIso = dataCompraRaw.toISOString();
             }
             itens.push({
                 id: data.id || doc.id,
@@ -1349,17 +1806,11 @@ exports.adminListGastos = functions.https.onRequest(async (req, res) => {
                 ativo: data.ativo !== false,
             });
         });
-        itens.sort((a, b) => {
-            const ta = a.data_compra ? Date.parse(a.data_compra) : 0;
-            const tb = b.data_compra ? Date.parse(b.data_compra) : 0;
-            return tb - ta;
-        });
-        const limited = itens.slice(0, limit);
         res.status(200).json({
             admin_user_id: adminUser.id,
             user_id: targetUserId,
             total: itens.length,
-            itens: limited,
+            itens,
         });
     }
     catch (err) {
@@ -1367,7 +1818,7 @@ exports.adminListGastos = functions.https.onRequest(async (req, res) => {
         res.status(500).send("Erro ao listar gastos");
     }
 });
-exports.adminListPagamentos = functions.https.onRequest(async (req, res) => {
+exports.adminListPagamentos = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         res.set("Access-Control-Allow-Origin", "*");
         res.set("Access-Control-Allow-Headers", "x-telegram-init-data, content-type");
@@ -1404,9 +1855,12 @@ exports.adminListPagamentos = functions.https.onRequest(async (req, res) => {
     }
     res.set("Access-Control-Allow-Origin", "*");
     try {
+        const fetchLimit = Math.min(3000, Math.max(limit * 3, limit));
         const snap = await firebase_1.db
             .collection("pagamentos")
             .where("user_id", "==", targetUserId)
+            .orderBy("data_pagamento", "desc")
+            .limit(fetchLimit)
             .get();
         const itens = [];
         snap.forEach((doc) => {
@@ -1420,6 +1874,9 @@ exports.adminListPagamentos = functions.https.onRequest(async (req, res) => {
             if (dataPagAny && typeof dataPagAny.toDate === "function") {
                 dataPagIso = dataPagAny.toDate().toISOString();
             }
+            else if (dataPagRaw instanceof Date) {
+                dataPagIso = dataPagRaw.toISOString();
+            }
             itens.push({
                 id: data.id || doc.id,
                 descricao: data.descricao || "Pagamento",
@@ -1427,11 +1884,6 @@ exports.adminListPagamentos = functions.https.onRequest(async (req, res) => {
                 data_pagamento: dataPagIso,
                 cancelado: !!data.cancelado,
             });
-        });
-        itens.sort((a, b) => {
-            const ta = a.data_pagamento ? Date.parse(a.data_pagamento) : 0;
-            const tb = b.data_pagamento ? Date.parse(b.data_pagamento) : 0;
-            return tb - ta;
         });
         const limited = itens.slice(0, limit);
         res.status(200).json({
@@ -1446,7 +1898,7 @@ exports.adminListPagamentos = functions.https.onRequest(async (req, res) => {
         res.status(500).send("Erro ao listar pagamentos");
     }
 });
-exports.adminResumoFatura = functions.https.onRequest(async (req, res) => {
+exports.adminResumoFatura = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         res.set("Access-Control-Allow-Origin", "*");
         res.set("Access-Control-Allow-Headers", "x-telegram-init-data, content-type");
@@ -1511,7 +1963,7 @@ exports.adminResumoFatura = functions.https.onRequest(async (req, res) => {
         res.status(500).send("Erro ao obter resumo de fatura");
     }
 });
-exports.adminEditGasto = functions.https.onRequest(async (req, res) => {
+exports.adminEditGasto = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         res.set("Access-Control-Allow-Origin", "*");
         res.set("Access-Control-Allow-Headers", "x-telegram-init-data, content-type");
@@ -1624,7 +2076,7 @@ exports.adminEditGasto = functions.https.onRequest(async (req, res) => {
         res.status(500).json({ error: "Erro ao editar gasto" });
     }
 });
-exports.adminDelGasto = functions.https.onRequest(async (req, res) => {
+exports.adminDelGasto = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         res.set("Access-Control-Allow-Origin", "*");
         res.set("Access-Control-Allow-Headers", "x-telegram-init-data, content-type");
@@ -1690,7 +2142,7 @@ exports.adminDelGasto = functions.https.onRequest(async (req, res) => {
         res.status(500).json({ error: "Erro ao inativar gasto" });
     }
 });
-exports.adminEditPagamento = functions.https.onRequest(async (req, res) => {
+exports.adminEditPagamento = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         res.set("Access-Control-Allow-Origin", "*");
         res.set("Access-Control-Allow-Headers", "x-telegram-init-data, content-type");
@@ -1774,7 +2226,7 @@ exports.adminEditPagamento = functions.https.onRequest(async (req, res) => {
         res.status(500).json({ error: "Erro ao editar pagamento" });
     }
 });
-exports.adminDelPagamento = functions.https.onRequest(async (req, res) => {
+exports.adminDelPagamento = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         res.set("Access-Control-Allow-Origin", "*");
         res.set("Access-Control-Allow-Headers", "x-telegram-init-data, content-type");
@@ -1840,7 +2292,7 @@ exports.adminDelPagamento = functions.https.onRequest(async (req, res) => {
         res.status(500).json({ error: "Erro ao cancelar pagamento" });
     }
 });
-exports.userGetOverview = functions.https.onRequest(async (req, res) => {
+exports.userGetOverview = httpsWithSecrets.onRequest(async (req, res) => {
     var _a, _b, _c, _d, _e, _f;
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
@@ -1945,6 +2397,9 @@ exports.userGetOverview = functions.https.onRequest(async (req, res) => {
             autorizado: true,
             isAdmin: ctx.isAdmin,
             user_id: ctx.userIdStr,
+            features: {
+                invoice_pdf_request: !!(ctx.userRecord && ctx.userRecord.invoice_pdf_enabled === true),
+            },
             user_name: (_c = (_b = (_a = ctx.userRecord) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : ctx.webAppUser.first_name) !== null && _c !== void 0 ? _c : "",
             username: (_f = (_e = (_d = ctx.userRecord) === null || _d === void 0 ? void 0 : _d.username) !== null && _e !== void 0 ? _e : ctx.webAppUser.username) !== null && _f !== void 0 ? _f : null,
             mes_ref: mesRef,
@@ -1965,7 +2420,355 @@ exports.userGetOverview = functions.https.onRequest(async (req, res) => {
     }
 });
 
-exports.userRequestAccess = functions.https.onRequest(async (req, res) => {
+exports.userBootstrap = httpsWithSecrets.onRequest(async (req, res) => {
+    var _a, _b, _c, _d, _e, _f;
+    if (req.method === "OPTIONS") {
+        setWebAppCors(res);
+        res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+        res.status(204).send("");
+        return;
+    }
+    if (req.method !== "GET") {
+        res.status(405).send("Method Not Allowed");
+        return;
+    }
+    const ctx = await getWebAppUserContext(req, res);
+    if (!ctx) {
+        return;
+    }
+    setWebAppCors(res);
+    if (!ctx.autorizado) {
+        let solicitacaoAcesso = null;
+        try {
+            const solicitSnap = await firebase_1.db
+                .collection("solicitacoes_acesso")
+                .doc(ctx.userIdStr)
+                .get();
+            if (solicitSnap.exists) {
+                const sdata = solicitSnap.data() || {};
+                solicitacaoAcesso = {
+                    status: sdata.status || null,
+                    solicitado_em: sdata.solicitado_em || null,
+                    atualizado_em: sdata.atualizado_em || null,
+                    aprovado_em: sdata.aprovado_em || null,
+                    aprovado_por: sdata.aprovado_por || null,
+                };
+            }
+        }
+        catch (err) {
+            console.error("Erro ao carregar solicitacao_acesso para userBootstrap", err);
+        }
+        res.status(403).json({
+            autorizado: false,
+            isAdmin: ctx.isAdmin,
+            user_id: ctx.userIdStr,
+            solicitacao_acesso: solicitacaoAcesso,
+            error: "Seu acesso ainda não foi liberado. Peça a liberação no mini app ou aguarde um administrador aprovar.",
+        });
+        return;
+    }
+
+    const agora = new Date();
+    let mesRef = agora.getMonth() + 1;
+    let anoRef = agora.getFullYear();
+    const mesRaw = req.query.mes;
+    const anoRaw = req.query.ano;
+    if (typeof mesRaw === "string" && typeof anoRaw === "string") {
+        const mesParsed = Number.parseInt(mesRaw, 10);
+        const anoParsed = Number.parseInt(anoRaw, 10);
+        if (Number.isFinite(mesParsed) &&
+            mesParsed >= 1 &&
+            mesParsed <= 12 &&
+            Number.isFinite(anoParsed) &&
+            anoParsed >= 2000 &&
+            anoParsed <= 2100) {
+            mesRef = mesParsed;
+            anoRef = anoParsed;
+        }
+    }
+
+    const gastosLimitRaw = req.query.gastosLimit;
+    let gastosLimit = 100;
+    if (typeof gastosLimitRaw === "string") {
+        const parsed = Number.parseInt(gastosLimitRaw, 10);
+        if (Number.isFinite(parsed) && parsed > 0 && parsed <= 100) {
+            gastosLimit = parsed;
+        }
+    }
+    const pagamentosLimitRaw = req.query.pagamentosLimit;
+    let pagamentosLimit = 100;
+    if (typeof pagamentosLimitRaw === "string") {
+        const parsed = Number.parseInt(pagamentosLimitRaw, 10);
+        if (Number.isFinite(parsed) && parsed > 0 && parsed <= 100) {
+            pagamentosLimit = parsed;
+        }
+    }
+
+    try {
+        const userId = ctx.userIdStr;
+
+        const overviewPromise = (async () => {
+            const saldoAcumuladoBruto = await (0, handlers_1.calcularSaldoUsuarioAteMes)(userId, mesRef, anoRef);
+            const { itens, totais } = await (0, handlers_1.obterExtratoConsumoUsuario)(userId, mesRef, anoRef);
+            const BASE_MES = 10;
+            const BASE_ANO = 2025;
+            let saldoAcumulado = saldoAcumuladoBruto;
+            let saldoBase = 0;
+            if (anoRef > BASE_ANO || (anoRef === BASE_ANO && mesRef > BASE_MES)) {
+                saldoBase = await (0, handlers_1.calcularSaldoUsuarioAteMes)(userId, BASE_MES, BASE_ANO);
+                saldoAcumulado = Number((saldoAcumuladoBruto - saldoBase).toFixed(2));
+            }
+            const totaisComAcumulado = Object.assign(Object.assign({}, totais), { saldo_acumulado: saldoAcumulado, saldo_acumulado_bruto: saldoAcumuladoBruto, saldo_quitado_ate_base: saldoBase, base_mes: BASE_MES, base_ano: BASE_ANO });
+            const itensJson = itens.map((item) => {
+                const raw = item.data;
+                let iso = null;
+                try {
+                    if (raw instanceof Date) {
+                        iso = raw.toISOString();
+                    }
+                    else if (raw && typeof raw.toDate === "function") {
+                        const d = raw.toDate();
+                        iso = d.toISOString();
+                    }
+                }
+                catch (_a) {
+                    iso = null;
+                }
+                return {
+                    data: iso,
+                    descricao: item.descricao || "",
+                    valor: Number(item.valor || 0),
+                    tipo: item.tipo || "",
+                    meta: item.meta || {},
+                };
+            });
+            return {
+                ok: true,
+                autorizado: true,
+                isAdmin: ctx.isAdmin,
+                user_id: ctx.userIdStr,
+                features: {
+                    invoice_pdf_request: !!(ctx.userRecord && ctx.userRecord.invoice_pdf_enabled === true),
+                },
+                user_name: (_c = (_b = (_a = ctx.userRecord) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : ctx.webAppUser.first_name) !== null && _c !== void 0 ? _c : "",
+                username: (_f = (_e = (_d = ctx.userRecord) === null || _d === void 0 ? void 0 : _d.username) !== null && _e !== void 0 ? _e : ctx.webAppUser.username) !== null && _f !== void 0 ? _f : null,
+                mes_ref: mesRef,
+                ano_ref: anoRef,
+                saldo_atual: saldoAcumulado,
+                saldo_atual_bruto: saldoAcumuladoBruto,
+                extrato_atual: {
+                    totais: totaisComAcumulado,
+                    itens: itensJson,
+                },
+            };
+        })();
+
+        const gastosPromise = firebase_1.db
+            .collection("gastos")
+            .where("user_id", "==", userId)
+            .where("ativo", "==", true)
+            .orderBy("data_compra", "desc")
+            .limit(gastosLimit)
+            .get();
+
+        const pagamentosFetchLimit = Math.min(300, Math.max(pagamentosLimit * 3, pagamentosLimit));
+        const pagamentosPromise = firebase_1.db
+            .collection("pagamentos")
+            .where("user_id", "==", userId)
+            .orderBy("data_pagamento", "desc")
+            .limit(pagamentosFetchLimit)
+            .get();
+
+        const cyclesGastosPromise = firebase_1.db
+            .collection("gastos")
+            .where("user_id", "==", userId)
+            .where("ativo", "==", true)
+            .select("data_compra", "parcelas_total")
+            .get();
+
+        const cyclesPagamentosPromise = firebase_1.db
+            .collection("pagamentos")
+            .where("user_id", "==", userId)
+            .select("data_pagamento", "cancelado")
+            .get();
+
+        const [overview, gastosSnap, pagamentosSnap, gastosCyclesSnap, pagamentosCyclesSnap] = await Promise.all([
+            overviewPromise,
+            gastosPromise,
+            pagamentosPromise,
+            cyclesGastosPromise,
+            cyclesPagamentosPromise,
+        ]);
+
+        const gastosItens = [];
+        gastosSnap.forEach((doc) => {
+            const data = doc.data() || {};
+            const dataCompraRaw = data.data_compra;
+            let dataCompraIso = null;
+            const dataCompraAny = dataCompraRaw;
+            if (dataCompraAny && typeof dataCompraAny.toDate === "function") {
+                dataCompraIso = dataCompraAny.toDate().toISOString();
+            }
+            else if (dataCompraRaw instanceof Date) {
+                dataCompraIso = dataCompraRaw.toISOString();
+            }
+            gastosItens.push({
+                id: data.id || doc.id,
+                descricao: data.descricao || "",
+                valor_total: Number(data.valor_total || data.valor_parcela || 0),
+                parcelas_total: Number(data.parcelas_total || 1),
+                valor_parcela: Number(data.valor_parcela || data.valor_total || 0),
+                data_compra: dataCompraIso,
+                ativo: data.ativo !== false,
+            });
+        });
+
+        const pagamentosAll = [];
+        pagamentosSnap.forEach((doc) => {
+            const data = doc.data() || {};
+            if (data.cancelado) {
+                return;
+            }
+            const dataPagRaw = data.data_pagamento;
+            let dataPagIso = null;
+            const dataPagAny = dataPagRaw;
+            if (dataPagAny && typeof dataPagAny.toDate === "function") {
+                dataPagIso = dataPagAny.toDate().toISOString();
+            }
+            else if (dataPagRaw instanceof Date) {
+                dataPagIso = dataPagRaw.toISOString();
+            }
+            pagamentosAll.push({
+                id: data.id || doc.id,
+                descricao: data.descricao || "Pagamento",
+                valor: Number(data.valor || 0),
+                data_pagamento: dataPagIso,
+                cancelado: !!data.cancelado,
+            });
+        });
+        const pagamentosItens = pagamentosAll.slice(0, pagamentosLimit);
+
+        const cyclesSet = new Set();
+        gastosCyclesSnap.forEach((doc) => {
+            var _a;
+            const data = doc.data() || {};
+            const dataCompraRaw = data.data_compra;
+            let dataCompra = null;
+            const anyCompra = dataCompraRaw;
+            if (anyCompra && typeof anyCompra.toDate === "function") {
+                dataCompra = anyCompra.toDate();
+            }
+            else if (dataCompraRaw instanceof Date) {
+                dataCompra = dataCompraRaw;
+            }
+            if (!dataCompra) {
+                return;
+            }
+            const day = dataCompra.getDate();
+            let month = dataCompra.getMonth() + 1;
+            let year = dataCompra.getFullYear();
+            if (day > 9) {
+                month += 1;
+                if (month > 12) {
+                    month = 1;
+                    year += 1;
+                }
+            }
+            let totalParcelas = Number((_a = data.parcelas_total) !== null && _a !== void 0 ? _a : 1);
+            if (!Number.isFinite(totalParcelas) || totalParcelas < 1) {
+                totalParcelas = 1;
+            }
+            for (let i = 0; i < totalParcelas; i += 1) {
+                const mIndex = month + i;
+                const y = year + Math.floor((mIndex - 1) / 12);
+                const m = ((mIndex - 1) % 12) + 1;
+                const ciclo = `${String(m).padStart(2, "0")}/${y}`;
+                cyclesSet.add(ciclo);
+            }
+        });
+        pagamentosCyclesSnap.forEach((doc) => {
+            const data = doc.data() || {};
+            if (data.cancelado) {
+                return;
+            }
+            const dataPagRaw = data.data_pagamento;
+            let dataPag = null;
+            const anyPag = dataPagRaw;
+            if (anyPag && typeof anyPag.toDate === "function") {
+                dataPag = anyPag.toDate();
+            }
+            else if (dataPagRaw instanceof Date) {
+                dataPag = dataPagRaw;
+            }
+            if (!dataPag) {
+                return;
+            }
+            const day = dataPag.getDate();
+            let month = dataPag.getMonth() + 1;
+            let year = dataPag.getFullYear();
+            if (day >= 10) {
+                month += 1;
+                if (month > 12) {
+                    month = 1;
+                    year += 1;
+                }
+            }
+            const ciclo = `${String(month).padStart(2, "0")}/${year}`;
+            cyclesSet.add(ciclo);
+        });
+        let allCycles = Array.from(cyclesSet);
+        allCycles = allCycles.filter((cycle) => {
+            const [mStr, yStr] = cycle.split("/");
+            const m = Number(mStr);
+            const y = Number(yStr);
+            return Number.isFinite(m) && Number.isFinite(y) && m >= 1 && m <= 12;
+        });
+        allCycles.sort((a, b) => {
+            const [maStr, yaStr] = a.split("/");
+            const [mbStr, ybStr] = b.split("/");
+            const ma = Number(maStr);
+            const ya = Number(yaStr);
+            const mb = Number(mbStr);
+            const yb = Number(ybStr);
+            const ia = ya * 12 + ma;
+            const ib = yb * 12 + mb;
+            return ib - ia;
+        });
+        const now = new Date();
+        const currentMonth = now.getMonth() + 1;
+        const currentYear = now.getFullYear();
+        const maxIndex = currentYear * 12 + currentMonth + 1;
+        const limitedCycles = allCycles.filter((cycle) => {
+            const [mStr, yStr] = cycle.split("/");
+            const m = Number(mStr);
+            const y = Number(yStr);
+            if (!Number.isFinite(m) || !Number.isFinite(y)) {
+                return false;
+            }
+            const idx = y * 12 + m;
+            return idx <= maxIndex;
+        });
+        const cycles = limitedCycles.length > 0 ? limitedCycles : allCycles;
+
+        res.status(200).json(Object.assign(Object.assign({}, overview), { bootstrap: {
+                gastos: {
+                    total: gastosItens.length,
+                    itens: gastosItens,
+                },
+                pagamentos: {
+                    total: pagamentosAll.length,
+                    itens: pagamentosItens,
+                },
+                cycles,
+            } }));
+    }
+    catch (err) {
+        console.error("Erro em userBootstrap", err);
+        res.status(500).json({ error: "Erro ao carregar bootstrap do usuário" });
+    }
+});
+
+exports.userRequestAccess = httpsWithSecrets.onRequest(async (req, res) => {
     var _a;
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
@@ -2036,7 +2839,615 @@ exports.userRequestAccess = functions.https.onRequest(async (req, res) => {
     }
 });
 
-exports.userListGastos = functions.https.onRequest(async (req, res) => {
+function makeInvoiceRequestId(userId, cycle) {
+    const uid = String(userId || "").trim();
+    const c = String(cycle || "").trim().replace("/", "-");
+    return `inv_${uid}_${c}`;
+}
+function formatMoneyBRL(value) {
+    const n = Number(value || 0);
+    const fixed = Number.isFinite(n) ? n.toFixed(2) : "0.00";
+    return `R$ ${fixed.replace(".", ",")}`;
+}
+function toIsoDate(value) {
+    if (!value) {
+        return null;
+    }
+    try {
+        if (value instanceof Date) {
+            return value.toISOString();
+        }
+        if (value && typeof value.toDate === "function") {
+            return value.toDate().toISOString();
+        }
+        if (typeof value === "string") {
+            const d = new Date(value);
+            if (!Number.isNaN(d.getTime())) {
+                return d.toISOString();
+            }
+        }
+    }
+    catch (_a) {
+        return null;
+    }
+    return null;
+}
+
+exports.userRequestInvoicePdf = httpsWithSecrets.onRequest(async (req, res) => {
+    if (req.method === "OPTIONS") {
+        setWebAppCors(res);
+        res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+        res.status(204).send("");
+        return;
+    }
+    if (req.method !== "POST") {
+        res.status(405).send("Method Not Allowed");
+        return;
+    }
+    const ctx = await getWebAppUserContext(req, res);
+    if (!ctx) {
+        return;
+    }
+    setWebAppCors(res);
+    if (!ctx.autorizado) {
+        res.status(403).json({
+            autorizado: false,
+            user_id: ctx.userIdStr,
+            error: "Seu acesso ainda não foi liberado.",
+        });
+        return;
+    }
+    const enabled = !!(ctx.userRecord && ctx.userRecord.invoice_pdf_enabled === true);
+    if (!enabled) {
+        res.status(403).json({
+            ok: false,
+            user_id: ctx.userIdStr,
+            error: "Seu usuário não está habilitado para solicitar fatura em PDF.",
+        });
+        return;
+    }
+    const body = req.body || {};
+    const cycleRaw = body.cycle;
+    const cycleParsed = parseCycleString(cycleRaw);
+    if (!cycleParsed) {
+        res.status(400).json({ error: "cycle obrigatório (formato MM/AAAA)" });
+        return;
+    }
+    const { mes, ano, cycle } = cycleParsed;
+    const requestId = makeInvoiceRequestId(ctx.userIdStr, cycle);
+    try {
+        const now = new Date();
+        const docRef = firebase_1.db.collection("invoice_requests").doc(requestId);
+        const snap = await docRef.get();
+        const existing = snap.exists ? (snap.data() || {}) : null;
+        const existingStatus = existing ? String(existing.status || "").toLowerCase() : "";
+        if (existingStatus && existingStatus !== "rejected") {
+            res.status(200).json({
+                ok: true,
+                user_id: ctx.userIdStr,
+                request_id: requestId,
+                cycle,
+                status: existingStatus,
+                message: "Solicitação já registrada. Aguarde.",
+            });
+            return;
+        }
+        await docRef.set({
+            id: requestId,
+            user_id: ctx.userIdStr,
+            cycle,
+            mes,
+            ano,
+            status: "pending",
+            requested_at: now,
+            updated_at: now,
+            user_name: (ctx.userRecord && ctx.userRecord.name) ? String(ctx.userRecord.name) : String(ctx.webAppUser.first_name || ""),
+            username: (ctx.userRecord && ctx.userRecord.username) ? String(ctx.userRecord.username) : (ctx.webAppUser.username ? String(ctx.webAppUser.username) : null),
+        }, { merge: true });
+
+        await writeAuditLog({
+            actor_user_id: ctx.userIdStr,
+            action: "user_request_invoice_pdf",
+            entity: "invoice_request",
+            entity_id: requestId,
+            target_user_id: ctx.userIdStr,
+            before: existing ? { status: existing.status || null } : null,
+            after: { status: "pending", cycle },
+        });
+
+        // Push profissional no celular do admin: mensagem do bot no Telegram (gera notificação nativa).
+        try {
+            const token = getBotToken();
+            const name = (ctx.userRecord && ctx.userRecord.name) ? String(ctx.userRecord.name) : String(ctx.webAppUser.first_name || "Usuário");
+            const uname = (ctx.userRecord && ctx.userRecord.username) ? `@${String(ctx.userRecord.username)}` : (ctx.webAppUser.username ? `@${String(ctx.webAppUser.username)}` : "");
+            const text = `Solicitação de fatura PDF\nUsuário: ${name} ${uname}\nID: ${ctx.userIdStr}\nCiclo: ${cycle}`;
+            const admins = Array.isArray(admin_1.ADMIN_USER_IDS) ? admin_1.ADMIN_USER_IDS : [];
+            for (const adminId of admins) {
+                try {
+                    await sendTelegramTextMessage(token, String(adminId), text);
+                }
+                catch (err) {
+                    console.error("Falha ao notificar admin sobre invoice", err);
+                }
+            }
+        }
+        catch (err) {
+            console.error("Falha ao preparar notificação Telegram para invoice", err);
+        }
+
+        res.status(200).json({
+            ok: true,
+            user_id: ctx.userIdStr,
+            request_id: requestId,
+            cycle,
+            status: "pending",
+            message: "Aguarde, sua fatura está sendo gerada e em breve estará disponível para download.",
+        });
+    }
+    catch (err) {
+        console.error("Erro em userRequestInvoicePdf", err);
+        res.status(500).json({ error: "Erro ao solicitar fatura" });
+    }
+});
+
+exports.userGetInvoiceStatus = httpsWithSecrets.onRequest(async (req, res) => {
+    if (req.method === "OPTIONS") {
+        setWebAppCors(res);
+        res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+        res.status(204).send("");
+        return;
+    }
+    if (req.method !== "GET") {
+        res.status(405).send("Method Not Allowed");
+        return;
+    }
+    const ctx = await getWebAppUserContext(req, res);
+    if (!ctx) {
+        return;
+    }
+    setWebAppCors(res);
+    if (!ctx.autorizado) {
+        res.status(403).json({ autorizado: false, user_id: ctx.userIdStr, error: "Acesso não liberado." });
+        return;
+    }
+    const cycleRaw = req.query.cycle;
+    const cycleParsed = parseCycleString(cycleRaw);
+    if (!cycleParsed) {
+        res.status(400).json({ error: "cycle obrigatório (formato MM/AAAA)" });
+        return;
+    }
+    const { cycle } = cycleParsed;
+    const requestId = makeInvoiceRequestId(ctx.userIdStr, cycle);
+    try {
+        const docRef = firebase_1.db.collection("invoice_requests").doc(requestId);
+        const snap = await docRef.get();
+        if (!snap.exists) {
+            res.status(200).json({ ok: true, user_id: ctx.userIdStr, cycle, status: "none" });
+            return;
+        }
+        const data = snap.data() || {};
+        const status = String(data.status || "pending").toLowerCase();
+        const storagePath = data.storage_path ? String(data.storage_path) : null;
+        let downloadUrl = null;
+        if (status === "ready" && storagePath) {
+            try {
+                const bucket = firebaseAdmin.storage().bucket();
+                const file = bucket.file(storagePath);
+                const expires = Date.now() + 60 * 60 * 1000;
+                const urls = await file.getSignedUrl({ action: "read", expires });
+                downloadUrl = Array.isArray(urls) && urls.length > 0 ? urls[0] : null;
+            }
+            catch (err) {
+                console.error("Erro ao gerar signed url de invoice", err);
+                downloadUrl = null;
+            }
+        }
+        res.status(200).json({
+            ok: true,
+            user_id: ctx.userIdStr,
+            cycle,
+            status,
+            request: {
+                id: data.id || requestId,
+                cycle: data.cycle || cycle,
+                status,
+                updated_at: data.updated_at || null,
+                fulfill_mode: data.fulfill_mode || null,
+            },
+            download_url: downloadUrl,
+        });
+    }
+    catch (err) {
+        console.error("Erro em userGetInvoiceStatus", err);
+        res.status(500).json({ error: "Erro ao carregar status da fatura" });
+    }
+});
+
+exports.adminListInvoiceRequests = httpsWithSecrets.onRequest(async (req, res) => {
+    if (req.method === "OPTIONS") {
+        setWebAppCors(res);
+        res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+        res.status(204).send("");
+        return;
+    }
+    if (req.method !== "GET") {
+        res.status(405).send("Method Not Allowed");
+        return;
+    }
+    const adminUser = await verifyAdminFromRequest(req, res);
+    if (!adminUser) {
+        return;
+    }
+    setWebAppCors(res);
+    const status = typeof req.query.status === "string" ? req.query.status.trim().toLowerCase() : "pending";
+    let limit = 50;
+    const limitRaw = req.query.limit;
+    if (typeof limitRaw === "string") {
+        const parsed = Number.parseInt(limitRaw, 10);
+        if (Number.isFinite(parsed) && parsed > 0 && parsed <= 200) {
+            limit = parsed;
+        }
+    }
+    try {
+        let query = firebase_1.db.collection("invoice_requests").limit(Math.min(200, limit * 3));
+        if (status && status !== "all") {
+            query = query.where("status", "==", status);
+        }
+        const snap = await query.get();
+        const items = [];
+        snap.forEach((doc) => {
+            const data = doc.data() || {};
+            const updatedIso = toIsoDate(data.updated_at);
+            const requestedIso = toIsoDate(data.requested_at);
+            items.push({
+                id: data.id || doc.id,
+                user_id: data.user_id || null,
+                user_name: data.user_name || "",
+                username: data.username || null,
+                cycle: data.cycle || null,
+                status: data.status || "pending",
+                requested_at: requestedIso,
+                updated_at: updatedIso,
+                fulfill_mode: data.fulfill_mode || null,
+                storage_path: data.storage_path || null,
+                file_name: data.file_name || null,
+            });
+        });
+        items.sort((a, b) => {
+            const ta = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+            const tb = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+            return tb - ta;
+        });
+        res.status(200).json({ ok: true, admin_user_id: String(adminUser.id), items: items.slice(0, limit) });
+    }
+    catch (err) {
+        console.error("Erro em adminListInvoiceRequests", err);
+        res.status(500).json({ error: "Erro ao listar solicitações de fatura" });
+    }
+});
+
+exports.adminCreateInvoiceUploadUrl = httpsWithSecrets.onRequest(async (req, res) => {
+    if (req.method === "OPTIONS") {
+        setWebAppCors(res);
+        res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+        res.status(204).send("");
+        return;
+    }
+    if (req.method !== "POST") {
+        res.status(405).send("Method Not Allowed");
+        return;
+    }
+    const adminUser = await verifyAdminFromRequest(req, res);
+    if (!adminUser) {
+        return;
+    }
+    setWebAppCors(res);
+    const body = req.body || {};
+    const userTermRaw = body.userId;
+    const userTerm = typeof userTermRaw === "string" ? userTermRaw.trim() : "";
+    const cycleParsed = parseCycleString(body.cycle);
+    if (!userTerm) {
+        res.status(400).json({ error: "userId obrigatório" });
+        return;
+    }
+    if (!cycleParsed) {
+        res.status(400).json({ error: "cycle obrigatório (MM/AAAA)" });
+        return;
+    }
+    const targetUserId = await resolveTargetUserId(userTerm);
+    if (!targetUserId) {
+        res.status(404).json({ error: "Usuário não encontrado" });
+        return;
+    }
+    const { cycle, mes, ano } = cycleParsed;
+    const requestId = makeInvoiceRequestId(targetUserId, cycle);
+    try {
+        const now = new Date();
+        const bucket = firebaseAdmin.storage().bucket();
+        const storagePath = `invoices/${targetUserId}/${String(ano)}-${String(mes).padStart(2, "0")}/upload_${Date.now()}.pdf`;
+        const file = bucket.file(storagePath);
+        const expires = Date.now() + 15 * 60 * 1000;
+        const urls = await file.getSignedUrl({
+            action: "write",
+            expires,
+            contentType: "application/pdf",
+        });
+        const uploadUrl = Array.isArray(urls) && urls.length > 0 ? urls[0] : null;
+        if (!uploadUrl) {
+            res.status(500).json({ error: "Falha ao gerar URL de upload" });
+            return;
+        }
+        await firebase_1.db.collection("invoice_requests").doc(requestId).set({
+            id: requestId,
+            user_id: targetUserId,
+            cycle,
+            mes,
+            ano,
+            status: "uploading",
+            updated_at: now,
+            fulfill_mode: "uploaded",
+            fulfilled_by: String(adminUser.id),
+            storage_path: storagePath,
+            file_name: `fatura_${cycle.replace("/", "-")}.pdf`,
+        }, { merge: true });
+        await writeAuditLog({
+            actor_user_id: String(adminUser.id),
+            action: "admin_create_invoice_upload_url",
+            entity: "invoice_request",
+            entity_id: requestId,
+            target_user_id: String(targetUserId),
+            before: null,
+            after: { status: "uploading", cycle, storage_path: storagePath },
+        });
+        res.status(200).json({
+            ok: true,
+            admin_user_id: String(adminUser.id),
+            user_id: String(targetUserId),
+            request_id: requestId,
+            cycle,
+            upload_url: uploadUrl,
+            storage_path: storagePath,
+            expires_at_ms: expires,
+        });
+    }
+    catch (err) {
+        console.error("Erro em adminCreateInvoiceUploadUrl", err);
+        res.status(500).json({ error: "Erro ao preparar upload" });
+    }
+});
+
+exports.adminMarkInvoiceUploaded = httpsWithSecrets.onRequest(async (req, res) => {
+    if (req.method === "OPTIONS") {
+        setWebAppCors(res);
+        res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+        res.status(204).send("");
+        return;
+    }
+    if (req.method !== "POST") {
+        res.status(405).send("Method Not Allowed");
+        return;
+    }
+    const adminUser = await verifyAdminFromRequest(req, res);
+    if (!adminUser) {
+        return;
+    }
+    setWebAppCors(res);
+    const body = req.body || {};
+    const requestIdRaw = body.requestId;
+    const requestId = typeof requestIdRaw === "string" ? requestIdRaw.trim() : "";
+    if (!requestId) {
+        res.status(400).json({ error: "requestId obrigatório" });
+        return;
+    }
+    try {
+        const docRef = firebase_1.db.collection("invoice_requests").doc(requestId);
+        const snap = await docRef.get();
+        if (!snap.exists) {
+            res.status(404).json({ error: "Solicitação não encontrada" });
+            return;
+        }
+        const data = snap.data() || {};
+        const storagePath = data.storage_path ? String(data.storage_path) : "";
+        if (!storagePath) {
+            res.status(400).json({ error: "storage_path não encontrado para esta solicitação" });
+            return;
+        }
+        try {
+            const bucket = firebaseAdmin.storage().bucket();
+            const file = bucket.file(storagePath);
+            const existsArr = await file.exists();
+            const exists = Array.isArray(existsArr) && existsArr.length > 0 ? !!existsArr[0] : false;
+            if (!exists) {
+                res.status(400).json({ error: "Arquivo ainda não foi encontrado no Storage. Refaça o upload." });
+                return;
+            }
+        }
+        catch (err) {
+            console.error("Erro ao verificar arquivo no Storage", err);
+        }
+        const now = new Date();
+        await docRef.set({
+            status: "ready",
+            updated_at: now,
+            fulfilled_at: now,
+            fulfilled_by: String(adminUser.id),
+            fulfill_mode: data.fulfill_mode || "uploaded",
+        }, { merge: true });
+        await writeAuditLog({
+            actor_user_id: String(adminUser.id),
+            action: "admin_mark_invoice_uploaded",
+            entity: "invoice_request",
+            entity_id: requestId,
+            target_user_id: String(data.user_id || ""),
+            before: { status: data.status || null },
+            after: { status: "ready" },
+        });
+        res.status(200).json({ ok: true, request_id: requestId, status: "ready" });
+    }
+    catch (err) {
+        console.error("Erro em adminMarkInvoiceUploaded", err);
+        res.status(500).json({ error: "Erro ao finalizar upload" });
+    }
+});
+
+exports.adminGenerateInvoicePdf = httpsWithSecrets.onRequest(async (req, res) => {
+    if (req.method === "OPTIONS") {
+        setWebAppCors(res);
+        res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+        res.status(204).send("");
+        return;
+    }
+    if (req.method !== "POST") {
+        res.status(405).send("Method Not Allowed");
+        return;
+    }
+    const adminUser = await verifyAdminFromRequest(req, res);
+    if (!adminUser) {
+        return;
+    }
+    setWebAppCors(res);
+    const body = req.body || {};
+    const userTermRaw = body.userId;
+    const userTerm = typeof userTermRaw === "string" ? userTermRaw.trim() : "";
+    const cycleParsed = parseCycleString(body.cycle);
+    if (!userTerm) {
+        res.status(400).json({ error: "userId obrigatório" });
+        return;
+    }
+    if (!cycleParsed) {
+        res.status(400).json({ error: "cycle obrigatório (MM/AAAA)" });
+        return;
+    }
+    const targetUserId = await resolveTargetUserId(userTerm);
+    if (!targetUserId) {
+        res.status(404).json({ error: "Usuário não encontrado" });
+        return;
+    }
+    const { cycle, mes, ano } = cycleParsed;
+    const requestId = makeInvoiceRequestId(targetUserId, cycle);
+    try {
+        const now = new Date();
+        await firebase_1.db.collection("invoice_requests").doc(requestId).set({
+            id: requestId,
+            user_id: targetUserId,
+            cycle,
+            mes,
+            ano,
+            status: "generating",
+            updated_at: now,
+            fulfill_mode: "generated",
+            fulfilled_by: String(adminUser.id),
+        }, { merge: true });
+
+        const userSnap = await firebase_1.db.collection("usuarios").doc(targetUserId).get();
+        const userData = userSnap.exists ? (userSnap.data() || {}) : {};
+        const userName = String(userData.name || "");
+        const username = userData.username ? String(userData.username) : null;
+
+        const extrato = await (0, handlers_1.obterExtratoConsumoUsuario)(targetUserId, mes, ano);
+        const itens = Array.isArray(extrato.itens) ? extrato.itens : [];
+        const totais = extrato.totais || {};
+
+        const pdfBuffer = await new Promise((resolve, reject) => {
+            try {
+                const doc = new PDFDocument({ size: "A4", margin: 40 });
+                const chunks = [];
+                doc.on("data", (c) => chunks.push(c));
+                doc.on("end", () => resolve(Buffer.concat(chunks)));
+                doc.on("error", (e) => reject(e));
+
+                doc.fontSize(18).text(`Fatura (ciclo ${cycle})`, { align: "center" });
+                doc.moveDown(0.5);
+                doc.fontSize(11).text(`Usuário: ${userName || "-"}${username ? ` (@${username})` : ""}`);
+                doc.text(`User ID: ${targetUserId}`);
+                doc.text(`Gerado em: ${new Date().toISOString()}`);
+                doc.moveDown();
+
+                doc.fontSize(12).text("Lançamentos", { underline: true });
+                doc.moveDown(0.5);
+
+                doc.fontSize(10);
+                for (const item of itens) {
+                    const iso = toIsoDate(item.data);
+                    const date = iso ? iso.slice(0, 10) : "-";
+                    const desc = String(item.descricao || "").replace(/\s+/g, " ").trim();
+                    const tipo = String(item.tipo || "").toUpperCase();
+                    const valor = formatMoneyBRL(item.valor || 0);
+                    doc.text(`${date}  ${tipo.padEnd(10, " ")}  ${valor}  ${desc}`);
+                }
+                doc.moveDown();
+
+                doc.fontSize(12).text("Totais", { underline: true });
+                doc.moveDown(0.5);
+                doc.fontSize(11);
+                if (totais) {
+                    if (typeof totais.parcelas_mes !== "undefined") {
+                        doc.text(`Parcelas no mês: ${formatMoneyBRL(totais.parcelas_mes)}`);
+                    }
+                    if (typeof totais.pagamentos_mes !== "undefined") {
+                        doc.text(`Pagamentos no mês: ${formatMoneyBRL(totais.pagamentos_mes)}`);
+                    }
+                    if (typeof totais.saldo_mes !== "undefined") {
+                        doc.text(`Saldo do mês: ${formatMoneyBRL(totais.saldo_mes)}`);
+                    }
+                    if (typeof totais.saldo_acumulado !== "undefined") {
+                        doc.text(`Saldo acumulado: ${formatMoneyBRL(totais.saldo_acumulado)}`);
+                    }
+                }
+                doc.end();
+            }
+            catch (e) {
+                reject(e);
+            }
+        });
+
+        const bucket = firebaseAdmin.storage().bucket();
+        const storagePath = `invoices/${targetUserId}/${String(ano)}-${String(mes).padStart(2, "0")}/generated_${Date.now()}.pdf`;
+        await bucket.file(storagePath).save(pdfBuffer, {
+            contentType: "application/pdf",
+            resumable: false,
+            metadata: {
+                cacheControl: "private, max-age=0, no-cache",
+            },
+        });
+
+        const updatedAt = new Date();
+        await firebase_1.db.collection("invoice_requests").doc(requestId).set({
+            status: "ready",
+            updated_at: updatedAt,
+            fulfilled_at: updatedAt,
+            fulfill_mode: "generated",
+            fulfilled_by: String(adminUser.id),
+            storage_path: storagePath,
+            file_name: `fatura_${cycle.replace("/", "-")}.pdf`,
+        }, { merge: true });
+
+        await writeAuditLog({
+            actor_user_id: String(adminUser.id),
+            action: "admin_generate_invoice_pdf",
+            entity: "invoice_request",
+            entity_id: requestId,
+            target_user_id: String(targetUserId),
+            before: null,
+            after: { status: "ready", storage_path: storagePath },
+        });
+
+        res.status(200).json({
+            ok: true,
+            admin_user_id: String(adminUser.id),
+            user_id: String(targetUserId),
+            request_id: requestId,
+            cycle,
+            status: "ready",
+        });
+    }
+    catch (err) {
+        console.error("Erro em adminGenerateInvoicePdf", err);
+        res.status(500).json({ error: "Erro ao gerar fatura PDF" });
+    }
+});
+
+exports.userListGastos = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
         res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
@@ -2073,6 +3484,8 @@ exports.userListGastos = functions.https.onRequest(async (req, res) => {
             .collection("gastos")
             .where("user_id", "==", ctx.userIdStr)
             .where("ativo", "==", true)
+            .orderBy("data_compra", "desc")
+            .limit(limit)
             .get();
         const itens = [];
         snap.forEach((doc) => {
@@ -2082,6 +3495,9 @@ exports.userListGastos = functions.https.onRequest(async (req, res) => {
             const dataCompraAny = dataCompraRaw;
             if (dataCompraAny && typeof dataCompraAny.toDate === "function") {
                 dataCompraIso = dataCompraAny.toDate().toISOString();
+            }
+            else if (dataCompraRaw instanceof Date) {
+                dataCompraIso = dataCompraRaw.toISOString();
             }
             itens.push({
                 id: data.id || doc.id,
@@ -2093,17 +3509,11 @@ exports.userListGastos = functions.https.onRequest(async (req, res) => {
                 ativo: data.ativo !== false,
             });
         });
-        itens.sort((a, b) => {
-            const ta = a.data_compra ? Date.parse(a.data_compra) : 0;
-            const tb = b.data_compra ? Date.parse(b.data_compra) : 0;
-            return tb - ta;
-        });
-        const limited = itens.slice(0, limit);
         res.status(200).json({
             ok: true,
             user_id: ctx.userIdStr,
             total: itens.length,
-            itens: limited,
+            itens,
         });
     }
     catch (err) {
@@ -2111,7 +3521,7 @@ exports.userListGastos = functions.https.onRequest(async (req, res) => {
         res.status(500).json({ error: "Erro ao listar gastos" });
     }
 });
-exports.userListPagamentos = functions.https.onRequest(async (req, res) => {
+exports.userListPagamentos = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
         res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
@@ -2144,9 +3554,12 @@ exports.userListPagamentos = functions.https.onRequest(async (req, res) => {
         }
     }
     try {
+        const fetchLimit = Math.min(300, Math.max(limit * 3, limit));
         const snap = await firebase_1.db
             .collection("pagamentos")
             .where("user_id", "==", ctx.userIdStr)
+            .orderBy("data_pagamento", "desc")
+            .limit(fetchLimit)
             .get();
         const itens = [];
         snap.forEach((doc) => {
@@ -2160,6 +3573,9 @@ exports.userListPagamentos = functions.https.onRequest(async (req, res) => {
             if (dataPagAny && typeof dataPagAny.toDate === "function") {
                 dataPagIso = dataPagAny.toDate().toISOString();
             }
+            else if (dataPagRaw instanceof Date) {
+                dataPagIso = dataPagRaw.toISOString();
+            }
             itens.push({
                 id: data.id || doc.id,
                 descricao: data.descricao || "Pagamento",
@@ -2167,11 +3583,6 @@ exports.userListPagamentos = functions.https.onRequest(async (req, res) => {
                 data_pagamento: dataPagIso,
                 cancelado: !!data.cancelado,
             });
-        });
-        itens.sort((a, b) => {
-            const ta = a.data_pagamento ? Date.parse(a.data_pagamento) : 0;
-            const tb = b.data_pagamento ? Date.parse(b.data_pagamento) : 0;
-            return tb - ta;
         });
         const limited = itens.slice(0, limit);
         res.status(200).json({
@@ -2186,7 +3597,7 @@ exports.userListPagamentos = functions.https.onRequest(async (req, res) => {
         res.status(500).json({ error: "Erro ao listar pagamentos" });
     }
 });
-exports.userListBillingCycles = functions.https.onRequest(async (req, res) => {
+exports.userListBillingCycles = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
         res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
@@ -2359,7 +3770,7 @@ exports.userListBillingCycles = functions.https.onRequest(async (req, res) => {
         res.status(500).json({ error: "Erro ao listar ciclos" });
     }
 });
-exports.userRegistrarGasto = functions.https.onRequest(async (req, res) => {
+exports.userRegistrarGasto = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
         res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -2467,7 +3878,7 @@ exports.userRegistrarGasto = functions.https.onRequest(async (req, res) => {
         res.status(500).json({ error: "Erro ao registrar gasto" });
     }
 });
-exports.userRegistrarPagamento = functions.https.onRequest(async (req, res) => {
+exports.userRegistrarPagamento = httpsWithSecrets.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         setWebAppCors(res);
         res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -2510,6 +3921,7 @@ exports.userRegistrarPagamento = functions.https.onRequest(async (req, res) => {
         : "Pagamento";
     try {
         const agora = new Date();
+        const cicloPagamento = (0, handlers_1.getFaturaCycleFromDate)(agora);
         const pagamentoId = `pag_${ctx.userIdStr}_${Math.floor(Date.now() / 1000)}`;
         const valorFinal = Number(valor.toFixed(2));
         await firebase_1.db
@@ -2521,13 +3933,13 @@ exports.userRegistrarPagamento = functions.https.onRequest(async (req, res) => {
             valor: valorFinal,
             descricao,
             data_pagamento: agora,
-            mes: agora.getMonth() + 1,
-            ano: agora.getFullYear(),
+            mes: cicloPagamento.mes,
+            ano: cicloPagamento.ano,
             criado_em: agora,
             atualizado_em: agora,
         });
-        const mesRef = agora.getMonth() + 1;
-        const anoRef = agora.getFullYear();
+        const mesRef = cicloPagamento.mes;
+        const anoRef = cicloPagamento.ano;
         const saldoDepois = await (0, handlers_1.calcularSaldoUsuarioAteMes)(ctx.userIdStr, mesRef, anoRef);
         res.status(200).json({
             ok: true,

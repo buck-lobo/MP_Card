@@ -1,0 +1,31 @@
+{
+  "items": [
+    {
+      "date": "2026-02-23",
+      "version": "1.0.4",
+      "changes": [
+        "Painel admin: botões visíveis para registrar novo gasto e novo pagamento para o usuário selecionado",
+        "Fluxo admin acting-as-user aplicado nas operações user* com targetUserId"
+      ]
+    },
+    {
+      "date": "2025-12-21",
+      "version": "1.0.3",
+      "changes": [
+        "Validação do initData via @tma.js/init-data-node (reduz divergências de algoritmo/encoding)",
+        "Painel admin: detecção de admin usando /adminMeta (evita falso-negativo quando /adminListAccessRequests falha)",
+        "Solicitações de acesso: listagem sem orderBy para evitar exigência de índice composto; ordenação em memória"
+      ]
+    },
+    {
+      "date": "2025-12-21",
+      "version": "1.0.2",
+      "changes": [
+        "Migração de TELEGRAM_BOT_TOKEN para Secret Manager (process.env via secrets)",
+        "Hardening da validação do initData (fail-closed, logs sem dados sensíveis)",
+        "Sincronização .env -> Firebase Secret automatizada (PowerShell)",
+        "Sincronização de versões entre raiz/admin-webapp/functions via predeploy"
+      ]
+    }
+  ]
+}

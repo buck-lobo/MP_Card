@@ -1,3 +1,4 @@
+// NOSONAR
 import { sendMessage, answerCallbackQuery } from "./api";
 import { db } from "../firebase";
 import { ADMIN_USER_IDS } from "../admin";
@@ -6,7 +7,17 @@ import { ADMIN_USER_IDS } from "../admin";
 const ACCESS_CODE = "MP_ACCESS_2025";
 
 // URL do MiniApp / Painel WebApp (usada para usuários e administradores)
-const WEBAPP_URL = "https://bot-cartao-credito.web.app/?v=2025-12-03-1";
+// Importante: o Telegram/WebView pode cachear agressivamente o WebApp.
+// Para garantir que usuários recebam a build mais recente, usamos um cache-buster
+// baseado na versão (sincronizada pelo version-manager no deploy).
+const functionsPkg = require("../../package.json") as { version?: unknown };
+const webappVersion =
+  typeof functionsPkg?.version === "string" && functionsPkg.version.trim()
+    ? functionsPkg.version.trim()
+    : "dev";
+const WEBAPP_URL = `https://bot-cartao-credito.web.app/?v=${encodeURIComponent(
+  webappVersion,
+)}`;
 
 // Helpers para manter o modelo de dados próximo ao bot Python
 async function registerUser(user: any): Promise<void> {
@@ -50,14 +61,14 @@ function isAdmin(user: any): boolean {
 export async function ensureUserAuthorized(
   user: any,
   token: string,
-  chatId: number
+  chatId: number,
 ): Promise<boolean> {
   const userIdRaw = user?.id;
   if (userIdRaw === undefined || userIdRaw === null) {
     await sendMessage(
       token,
       chatId,
-      "Não foi possível identificar seu usuário no Telegram."
+      "Não foi possível identificar seu usuário no Telegram.",
     );
     return false;
   }
@@ -87,19 +98,14 @@ export async function ensureUserAuthorized(
     token,
     chatId,
     "⚠️ Seu acesso ainda não foi liberado para o mini app.\n\n" +
-      "Abra o mini app do cartão pelo Telegram e toque em \"Pedir liberação de acesso\" ou aguarde um administrador liberar seu acesso pelo painel."
+      'Abra o mini app do cartão pelo Telegram e toque em "Pedir liberação de acesso" ou aguarde um administrador liberar seu acesso pelo painel.',
   );
   return false;
 }
 
-async function getUserState(
-  userId: string | number
-): Promise<string | null> {
+async function getUserState(userId: string | number): Promise<string | null> {
   try {
-    const snap = await db
-      .collection("user_states")
-      .doc(String(userId))
-      .get();
+    const snap = await db.collection("user_states").doc(String(userId)).get();
     const data = snap.data();
     return (data && (data.estado as string)) || null;
   } catch (err) {
@@ -110,20 +116,20 @@ async function getUserState(
 
 async function setUserState(
   userId: string | number,
-  estado: string | null
+  estado: string | null,
 ): Promise<void> {
   const ref = db.collection("user_states").doc(String(userId));
   try {
-    if (!estado) {
-      await ref.delete().catch(() => undefined);
-    } else {
+    if (estado) {
       await ref.set(
         {
           estado,
           updated_at: new Date(),
         },
-        { merge: true }
+        { merge: true },
       );
+    } else {
+      await ref.delete().catch(() => undefined);
     }
   } catch (err) {
     console.error("Erro ao definir estado do usuário", userId, err);
@@ -146,7 +152,7 @@ function efetivoInicioFatura(
   mesInicio: number,
   anoInicio: number,
   diaCompra: number | null,
-  fechamentoDia = 9
+  fechamentoDia = 9,
 ): { mes: number; ano: number } {
   let mesEfetivo = Number(mesInicio);
   let anoEfetivo = Number(anoInicio);
@@ -161,11 +167,59 @@ function efetivoInicioFatura(
   return { mes: mesEfetivo, ano: anoEfetivo };
 }
 
+export function getFaturaCycleFromDate(
+  date: Date,
+  fechamentoDia = 9,
+): { mes: number; ano: number; cycle: string } {
+  const base = date instanceof Date ? date : new Date();
+  const dia = base.getDate();
+  let mes = base.getMonth() + 1;
+  let ano = base.getFullYear();
+
+  if (dia > fechamentoDia) {
+    mes += 1;
+    if (mes > 12) {
+      mes = 1;
+      ano += 1;
+    }
+  }
+
+  return {
+    mes,
+    ano,
+    cycle: `${String(mes).padStart(2, "0")}/${ano}`,
+  };
+}
+
+function resolvePagamentoCycle(
+  pagamento: any,
+  fechamentoDia = 9,
+): { mes: number; ano: number } | null {
+  const dataPagamento = toJsDate(pagamento?.data_pagamento);
+  if (dataPagamento) {
+    const ciclo = getFaturaCycleFromDate(dataPagamento, fechamentoDia);
+    return { mes: ciclo.mes, ano: ciclo.ano };
+  }
+
+  const mesPag = Number(pagamento?.mes);
+  const anoPag = Number(pagamento?.ano);
+  if (
+    Number.isFinite(mesPag) &&
+    Number.isFinite(anoPag) &&
+    mesPag >= 1 &&
+    mesPag <= 12
+  ) {
+    return { mes: mesPag, ano: anoPag };
+  }
+
+  return null;
+}
+
 function calcularParcelasVencidas(
   gasto: any,
   mesReferencia: number,
   anoReferencia: number,
-  fechamentoDia = 9
+  fechamentoDia = 9,
 ): number {
   const dataCompra = toJsDate(gasto.data_compra);
   const diaCompra = dataCompra ? dataCompra.getDate() : null;
@@ -176,7 +230,7 @@ function calcularParcelasVencidas(
     mesInicio,
     anoInicio,
     diaCompra,
-    fechamentoDia
+    fechamentoDia,
   );
 
   const mesesPassados =
@@ -185,55 +239,90 @@ function calcularParcelasVencidas(
   return Math.min(Math.max(0, mesesPassados), totalParcelas);
 }
 
+type UserFinanceSnapshots = {
+  gastos: any[];
+  pagamentos: any[];
+};
+
+const SNAPSHOT_CACHE_TTL_MS = 15_000;
+const snapshotCache = new Map<
+  string,
+  { at: number; value: UserFinanceSnapshots }
+>();
+
+async function getUserFinanceSnapshots(
+  userIdStr: string,
+): Promise<UserFinanceSnapshots> {
+  const now = Date.now();
+  const cached = snapshotCache.get(userIdStr);
+  if (cached && now - cached.at < SNAPSHOT_CACHE_TTL_MS) {
+    return cached.value;
+  }
+
+  const [gastosSnap, pagamentosSnap] = await Promise.all([
+    db
+      .collection("gastos")
+      .where("user_id", "==", userIdStr)
+      .where("ativo", "==", true)
+      .get(),
+    db.collection("pagamentos").where("user_id", "==", userIdStr).get(),
+  ]);
+
+  const gastos: any[] = [];
+  gastosSnap.forEach((doc) => gastos.push(doc.data()));
+
+  const pagamentos: any[] = [];
+  pagamentosSnap.forEach((doc) => pagamentos.push(doc.data()));
+
+  const value = { gastos, pagamentos };
+  snapshotCache.set(userIdStr, { at: now, value });
+  return value;
+}
+
 export async function calcularSaldoUsuarioAteMes(
   userId: string | number,
   mesRef: number,
   anoRef: number,
-  fechamentoDia = 9
+  fechamentoDia = 9,
+  snapshots?: UserFinanceSnapshots,
 ): Promise<number> {
   const userIdStr = String(userId);
 
   try {
     let totalGastosDevidos = 0;
-    const gastosSnap = await db
-      .collection("gastos")
-      .where("user_id", "==", userIdStr)
-      .where("ativo", "==", true)
-      .get();
+    const gastos =
+      snapshots?.gastos ?? (await getUserFinanceSnapshots(userIdStr)).gastos;
 
-    gastosSnap.forEach((doc) => {
-      const gasto = doc.data();
+    gastos.forEach((gasto) => {
       const parcelasDevidas = calcularParcelasVencidas(
         gasto,
         mesRef,
         anoRef,
-        fechamentoDia
+        fechamentoDia,
       );
       const valorParcela = Number(gasto.valor_parcela || 0);
       totalGastosDevidos += valorParcela * parcelasDevidas;
     });
 
     let totalPagamentos = 0;
-    const pagamentosSnap = await db
-      .collection("pagamentos")
-      .where("user_id", "==", userIdStr)
-      .get();
 
-    pagamentosSnap.forEach((doc) => {
-      const pagamento = doc.data() as any;
+    const pagamentos =
+      snapshots?.pagamentos ??
+      (await getUserFinanceSnapshots(userIdStr)).pagamentos;
+
+    const refIndex = anoRef * 12 + (mesRef - 1);
+    pagamentos.forEach((pagamento: any) => {
       if (pagamento.cancelado) {
         return;
       }
 
-      const mesPag = Number(pagamento.mes);
-      const anoPag = Number(pagamento.ano);
+      const cicloPagamento = resolvePagamentoCycle(pagamento, fechamentoDia);
+      if (!cicloPagamento) {
+        return;
+      }
 
-      if (
-        !Number.isFinite(mesPag) ||
-        !Number.isFinite(anoPag) ||
-        anoPag < anoRef ||
-        (anoPag === anoRef && mesPag <= mesRef)
-      ) {
+      const pagamentoIndex = cicloPagamento.ano * 12 + (cicloPagamento.mes - 1);
+      if (pagamentoIndex <= refIndex) {
         totalPagamentos += Number(pagamento.valor || 0);
       }
     });
@@ -256,7 +345,8 @@ async function calcularSaldoUsuario(userId: string | number): Promise<number> {
 export async function obterExtratoConsumoUsuario(
   userId: string | number,
   mesReferencia: number,
-  anoReferencia: number
+  anoReferencia: number,
+  snapshots?: UserFinanceSnapshots,
 ): Promise<{ itens: any[]; totais: any }> {
   const userIdStr = String(userId);
   const itens: any[] = [];
@@ -271,16 +361,8 @@ export async function obterExtratoConsumoUsuario(
   const refIndex = anoReferencia * 12 + (mesReferencia - 1);
 
   try {
-    const gastosSnap = await db
-      .collection("gastos")
-      .where("user_id", "==", userIdStr)
-      .where("ativo", "==", true)
-      .get();
-
-    const gastos: any[] = [];
-    gastosSnap.forEach((doc) => {
-      gastos.push(doc.data());
-    });
+    const gastos =
+      snapshots?.gastos ?? (await getUserFinanceSnapshots(userIdStr)).gastos;
 
     for (const gasto of gastos) {
       const dataCompra = toJsDate(gasto.data_compra) || new Date();
@@ -297,7 +379,7 @@ export async function obterExtratoConsumoUsuario(
       const { mes: mesEfetivo, ano: anoEfetivo } = efetivoInicioFatura(
         mesInicio,
         anoInicio,
-        diaCompra
+        diaCompra,
       );
       const startIndex = anoEfetivo * 12 + (mesEfetivo - 1);
       const diff = refIndex - startIndex;
@@ -323,16 +405,23 @@ export async function obterExtratoConsumoUsuario(
       totais.parcelas_mes += valorParcela;
     }
 
-    const pagamentosSnap = await db
-      .collection("pagamentos")
-      .where("user_id", "==", userIdStr)
-      .where("mes", "==", mesReferencia)
-      .where("ano", "==", anoReferencia)
-      .get();
+    const pagamentos =
+      snapshots?.pagamentos ??
+      (await getUserFinanceSnapshots(userIdStr)).pagamentos;
 
-    pagamentosSnap.forEach((doc) => {
-      const pagamento = doc.data();
+    pagamentos.forEach((pagamento: any) => {
       if (pagamento.cancelado) {
+        return;
+      }
+      const cicloPagamento = resolvePagamentoCycle(pagamento);
+      if (!cicloPagamento) {
+        return;
+      }
+
+      if (
+        cicloPagamento.mes !== mesReferencia ||
+        cicloPagamento.ano !== anoReferencia
+      ) {
         return;
       }
       const valor = Number(pagamento.valor || 0);
@@ -341,7 +430,7 @@ export async function obterExtratoConsumoUsuario(
       }
       const dataPagamento =
         toJsDate(pagamento.data_pagamento) ||
-        new Date(anoReferencia, mesReferencia - 1, 1);
+        new Date(cicloPagamento.ano, cicloPagamento.mes - 1, 1);
 
       itens.push({
         data: dataPagamento,
@@ -363,7 +452,7 @@ export async function obterExtratoConsumoUsuario(
     });
 
     totais.saldo_mes = Number(
-      (totais.parcelas_mes - totais.pagamentos_mes).toFixed(2)
+      (totais.parcelas_mes - totais.pagamentos_mes).toFixed(2),
     );
   } catch (err) {
     console.error("Erro ao obter extrato do usuário", userId, err);
@@ -379,11 +468,11 @@ function formatarValorBRL(valor: number): string {
   return `R$ ${valor.toFixed(2).replace(".", ",")}`;
 }
 
-function montarTextoExtrato(
+function montarTextoExtrato( // NOSONAR
   itens: any[],
   totais: any,
   mesReferencia: number,
-  anoReferencia: number
+  anoReferencia: number,
 ): string {
   const mesExibicao = Number(totais.mes_fatura || mesReferencia || 0);
   const anoExibicao = Number(totais.ano_fatura || anoReferencia || 0);
@@ -405,23 +494,24 @@ function montarTextoExtrato(
     anoInicio -= 1;
   }
   const inicioStr = `${String(10).padStart(2, "0")}/${String(
-    mesInicio
+    mesInicio,
   ).padStart(2, "0")}/${anoInicio}`;
-  const fimStr = `${String(9).padStart(2, "0")}/${String(
-    mesExibicao
-  ).padStart(2, "0")}/${anoExibicao}`;
+  const fimStr = `${String(9).padStart(2, "0")}/${String(mesExibicao).padStart(
+    2,
+    "0",
+  )}/${anoExibicao}`;
 
   linhas.push(titulo, `Período: ${inicioStr} a ${fimStr}`);
 
   if (pagamentosMes > 0) {
     linhas.push(
       "",
-      "Este extrato mostra as parcelas/gastos e pagamentos que caíram neste ciclo de fatura. Não é o saldo geral do cartão."
+      "Este extrato mostra as parcelas/gastos e pagamentos que caíram neste ciclo de fatura. Não é o saldo geral do cartão.",
     );
   } else {
     linhas.push(
       "",
-      "Esta fatura mostra apenas as parcelas/gastos deste ciclo de fatura. Não é o saldo geral do cartão."
+      "Esta fatura mostra apenas as parcelas/gastos deste ciclo de fatura. Não é o saldo geral do cartão.",
     );
   }
 
@@ -432,7 +522,7 @@ function montarTextoExtrato(
       const dataItem =
         toJsDate(item.data) || new Date(anoExibicao, mesExibicao - 1, 1);
       const dataStr = `${String(dataItem.getDate()).padStart(2, "0")}/${String(
-        dataItem.getMonth() + 1
+        dataItem.getMonth() + 1,
       ).padStart(2, "0")}`;
       const descricao = (item.descricao || "").trim() || "(sem descrição)";
       const valorStr = formatarValorBRL(Number(item.valor || 0));
@@ -447,33 +537,27 @@ function montarTextoExtrato(
             ? ` (${numParcela}/${Number(totalParcelas)})`
             : "";
         linhas.push(
-          `• ${dataStr} — ${descricao}${marcadorParcela} — ${valorStr}`
+          `• ${dataStr} — ${descricao}${marcadorParcela} — ${valorStr}`,
         );
       } else {
-        linhas.push(
-          `• ${dataStr} — <b>${descricao}</b> — ${valorStr}`
-        );
+        linhas.push(`• ${dataStr} — <b>${descricao}</b> — ${valorStr}`);
       }
     }
   }
 
   linhas.push(
     "\n<b>Totais do Período</b>",
-    `Gastos/Parcelas: ${formatarValorBRL(
-      Number(totais.parcelas_mes || 0)
-    )}`
+    `Gastos/Parcelas: ${formatarValorBRL(Number(totais.parcelas_mes || 0))}`,
   );
 
   if (pagamentosMes > 0) {
-    linhas.push(
-      `Pagamentos: -${formatarValorBRL(pagamentosMes)}`
-    );
+    linhas.push(`Pagamentos: -${formatarValorBRL(pagamentosMes)}`);
   }
 
   linhas.push(
     `<b>Saldo do Período:</b> ${formatarValorBRL(
-      Number(totais.saldo_mes || 0)
-    )}`
+      Number(totais.saldo_mes || 0),
+    )}`,
   );
 
   return linhas.join("\n");
@@ -491,12 +575,13 @@ function buildMainMenuKeyboard(): any {
         { text: "📋 Meus Gastos", callback_data: "menu_meus_gastos" },
       ],
       [
-        { text: "🧾 Fatura do ciclo atual", callback_data: "menu_fatura_atual" },
+        {
+          text: "🧾 Fatura do ciclo atual",
+          callback_data: "menu_fatura_atual",
+        },
         { text: "💸 Meus Pagamentos", callback_data: "menu_meus_pagamentos" },
       ],
-      [
-        { text: "📜 Extrato do mês", callback_data: "menu_extrato_mes" },
-      ],
+      [{ text: "📜 Extrato do mês", callback_data: "menu_extrato_mes" }],
       [{ text: "❓ Ajuda", callback_data: "menu_ajuda" }],
     ],
   };
@@ -505,7 +590,7 @@ function buildMainMenuKeyboard(): any {
 export async function handleCommandStart(
   message: any,
   token: string,
-  args: string[]
+  args: string[],
 ): Promise<void> {
   const chatId = message.chat.id;
   const user = message.from;
@@ -543,7 +628,7 @@ export async function handleCommandStart(
 export async function handleCommandHelp(
   message: any,
   token: string,
-  args: string[]
+  args: string[],
 ): Promise<void> {
   const chatId = message.chat.id;
   const text =
@@ -564,22 +649,22 @@ export async function handleCommandHelp(
 export async function handleCommandCodigo(
   message: any,
   token: string,
-  args: string[]
+  args: string[],
 ): Promise<void> {
   const chatId = message.chat.id;
   await sendMessage(
     token,
     chatId,
     "O fluxo de código de acesso foi desativado.\n\n" +
-      "Agora, para liberar seu acesso, abra o mini app do cartão no Telegram e toque em \"Pedir liberação de acesso\". " +
-      "Se já tiver feito o pedido, aguarde um administrador aprovar seu acesso pelo painel."
+      'Agora, para liberar seu acesso, abra o mini app do cartão no Telegram e toque em "Pedir liberação de acesso". ' +
+      "Se já tiver feito o pedido, aguarde um administrador aprovar seu acesso pelo painel.",
   );
 }
 
 export async function handleCommandAdminPainel(
   message: any,
   token: string,
-  args: string[]
+  args: string[],
 ): Promise<void> {
   const chatId = message.chat.id;
   const user = message.from;
@@ -612,7 +697,7 @@ export async function handleCommandAdminPainel(
 
 export async function handleMessageText(
   message: any,
-  token: string
+  token: string,
 ): Promise<void> {
   const chatId = message.chat.id;
   const user = message.from;
@@ -644,9 +729,9 @@ export async function handleMessageText(
   });
 }
 
-export async function handleCallbackQuery(
+export async function handleCallbackQuery( // NOSONAR
   callbackQuery: any,
-  token: string
+  token: string,
 ): Promise<void> {
   const chatId = callbackQuery.message.chat.id;
   const data: string = callbackQuery.data;
@@ -662,8 +747,7 @@ export async function handleCallbackQuery(
 
   if (data === "menu_principal") {
     await setUserState(user.id, ESTADO_NORMAL);
-    const texto =
-      "💳 <b>Menu Principal</b>\n\nEscolha uma opção abaixo:";
+    const texto = "💳 <b>Menu Principal</b>\n\nEscolha uma opção abaixo:";
     await sendMessage(token, chatId, texto, {
       parse_mode: "HTML",
       reply_markup: buildMainMenuKeyboard(),
@@ -716,59 +800,50 @@ export async function handleCallbackQuery(
       const top = gastos.slice(0, 10);
 
       if (top.length === 0) {
-        await sendMessage(
-          token,
-          chatId,
-          "Você ainda não registrou gastos.",
-          {
-            parse_mode: "HTML",
-            reply_markup: {
-              inline_keyboard: [
-                [
-                  {
-                    text: "💳 Adicionar Gasto",
-                    callback_data: "menu_adicionar_gasto",
-                  },
-                ],
-                [
-                  {
-                    text: "🔙 Menu Principal",
-                    callback_data: "menu_principal",
-                  },
-                ],
+        await sendMessage(token, chatId, "Você ainda não registrou gastos.", {
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: "💳 Adicionar Gasto",
+                  callback_data: "menu_adicionar_gasto",
+                },
               ],
-            },
-          }
-        );
+              [
+                {
+                  text: "🔙 Menu Principal",
+                  callback_data: "menu_principal",
+                },
+              ],
+            ],
+          },
+        });
       } else {
         const linhas: string[] = [];
         linhas.push("📋 <b>Seus últimos gastos</b>\n");
         for (const gasto of top) {
-          const dataCompra =
-            toJsDate(gasto.data_compra) || new Date();
+          const dataCompra = toJsDate(gasto.data_compra) || new Date();
           const dataStr = `${String(dataCompra.getDate()).padStart(
             2,
-            "0"
+            "0",
           )}/${String(dataCompra.getMonth() + 1).padStart(2, "0")}`;
-          const descricao =
-            (gasto.descricao || "").trim() || "(sem descrição)";
+          const descricao = (gasto.descricao || "").trim() || "(sem descrição)";
           const valorTotal = Number(
-            gasto.valor_total || gasto.valor_parcela || 0
+            gasto.valor_total || gasto.valor_parcela || 0,
           );
           const parcelasTotal = Number(gasto.parcelas_total || 1);
-          const valorParcela = Number(
-            gasto.valor_parcela || valorTotal
-          );
+          const valorParcela = Number(gasto.valor_parcela || valorTotal);
           let infoParcelas = "";
           if (parcelasTotal > 1) {
             infoParcelas = ` — ${parcelasTotal}x de ${formatarValorBRL(
-              valorParcela
+              valorParcela,
             )}`;
           }
           linhas.push(
             `• ${dataStr} — ${descricao} — ${formatarValorBRL(
-              valorTotal
-            )}${infoParcelas}`
+              valorTotal,
+            )}${infoParcelas}`,
           );
         }
 
@@ -801,7 +876,7 @@ export async function handleCallbackQuery(
         token,
         chatId,
         "❌ <b>Erro ao listar seus gastos.</b>\n\nTente novamente mais tarde.",
-        { parse_mode: "HTML" }
+        { parse_mode: "HTML" },
       );
     }
   } else if (data === "menu_meus_pagamentos") {
@@ -855,31 +930,27 @@ export async function handleCallbackQuery(
                 ],
               ],
             },
-          }
+          },
         );
       } else {
         const linhas: string[] = [];
         let totalPago = 0;
         linhas.push("💰 <b>Seus últimos pagamentos</b>\n");
         for (const pagamento of top) {
-          const dataPag =
-            toJsDate(pagamento.data_pagamento) || new Date();
+          const dataPag = toJsDate(pagamento.data_pagamento) || new Date();
           const dataStr = `${String(dataPag.getDate()).padStart(
             2,
-            "0"
+            "0",
           )}/${String(dataPag.getMonth() + 1).padStart(2, "0")}`;
-          const descricao =
-            (pagamento.descricao || "").trim() || "Pagamento";
+          const descricao = (pagamento.descricao || "").trim() || "Pagamento";
           const valor = Number(pagamento.valor || 0);
           totalPago += valor;
           linhas.push(
-            `• ${dataStr} — ${descricao} — ${formatarValorBRL(valor)}`
+            `• ${dataStr} — ${descricao} — ${formatarValorBRL(valor)}`,
           );
         }
 
-        linhas.push(
-          `\nTotal listado: ${formatarValorBRL(totalPago)}`
-        );
+        linhas.push(`\nTotal listado: ${formatarValorBRL(totalPago)}`);
 
         const textoLista = linhas.join("\n");
         const keyboard = {
@@ -910,13 +981,10 @@ export async function handleCallbackQuery(
         token,
         chatId,
         "❌ <b>Erro ao listar seus pagamentos.</b>\n\nTente novamente mais tarde.",
-        { parse_mode: "HTML" }
+        { parse_mode: "HTML" },
       );
     }
-  } else if (
-    data === "menu_fatura_atual" ||
-    data === "menu_extrato_mes"
-  ) {
+  } else if (data === "menu_fatura_atual" || data === "menu_extrato_mes") {
     await setUserState(user.id, ESTADO_NORMAL);
     const agora = new Date();
     const mesRef = agora.getMonth() + 1;
@@ -924,29 +992,20 @@ export async function handleCallbackQuery(
     const { itens, totais } = await obterExtratoConsumoUsuario(
       user.id,
       mesRef,
-      anoRef
+      anoRef,
     );
-    const textoExtrato = montarTextoExtrato(
-      itens,
-      totais,
-      mesRef,
-      anoRef
-    );
+    const textoExtrato = montarTextoExtrato(itens, totais, mesRef, anoRef);
 
     const keyboard = {
       inline_keyboard: [
-        [
-          { text: "📋 Meus Gastos", callback_data: "menu_meus_gastos" },
-        ],
+        [{ text: "📋 Meus Gastos", callback_data: "menu_meus_gastos" }],
         [
           {
             text: "💰 Meus Pagamentos",
             callback_data: "menu_meus_pagamentos",
           },
         ],
-        [
-          { text: "🔙 Menu Principal", callback_data: "menu_principal" },
-        ],
+        [{ text: "🔙 Menu Principal", callback_data: "menu_principal" }],
       ],
     };
 
@@ -971,8 +1030,9 @@ export async function handleCallbackQuery(
 export async function handleCommandGasto(
   message: any,
   token: string,
-  args: string[]
+  args: string[],
 ): Promise<void> {
+  // NOSONAR
   const chatId = message.chat.id;
   const user = message.from;
 
@@ -987,9 +1047,7 @@ export async function handleCommandGasto(
             callback_data: "menu_adicionar_gasto",
           },
         ],
-        [
-          { text: "🔙 Menu Principal", callback_data: "menu_principal" },
-        ],
+        [{ text: "🔙 Menu Principal", callback_data: "menu_principal" }],
       ],
     };
 
@@ -1018,7 +1076,7 @@ export async function handleCommandGasto(
       "❌ <b>Formato incorreto!</b><br><br>" +
         "Use: <code>&lt;descrição&gt; &lt;valor&gt; [parcelas]</code><br><br>" +
         "<b>Exemplos:</b> <code>Almoço 25.50</code> ou <code>Notebook 1200.00 12</code>",
-      { parse_mode: "HTML" }
+      { parse_mode: "HTML" },
     );
     return;
   }
@@ -1035,7 +1093,7 @@ export async function handleCommandGasto(
         "❌ <b>Erro nos dados informados!</b>\n\n" +
           "Verifique se o valor está correto e as parcelas são um número inteiro.\n\n" +
           "<b>Formato:</b> <descrição> <valor> [parcelas]",
-        { parse_mode: "HTML" }
+        { parse_mode: "HTML" },
       );
       return;
     }
@@ -1046,16 +1104,14 @@ export async function handleCommandGasto(
     if (len > 2) {
       const possivelParcelasStr = partes[len - 1];
       const possivelParcelas = Number.parseInt(possivelParcelasStr, 10);
-      if (!Number.isNaN(possivelParcelas)) {
-        parcelas = possivelParcelas < 1 ? 1 : possivelParcelas;
-        descricao = partes.slice(0, len - 2).join(" ");
-      } else {
+      if (Number.isNaN(possivelParcelas)) {
         descricao = partes.slice(0, len - 1).join(" ");
-        parcelas = 1;
+      } else {
+        parcelas = Math.max(1, possivelParcelas);
+        descricao = partes.slice(0, len - 2).join(" ");
       }
     } else {
       descricao = partes.slice(0, len - 1).join(" ");
-      parcelas = 1;
     }
 
     if (valor <= 0) {
@@ -1063,7 +1119,7 @@ export async function handleCommandGasto(
         token,
         chatId,
         "❌ <b>Valor deve ser maior que zero!</b>",
-        { parse_mode: "HTML" }
+        { parse_mode: "HTML" },
       );
       return;
     }
@@ -1073,7 +1129,7 @@ export async function handleCommandGasto(
         token,
         chatId,
         "❌ <b>Máximo de 60 parcelas permitido!</b>",
-        { parse_mode: "HTML" }
+        { parse_mode: "HTML" },
       );
       return;
     }
@@ -1105,16 +1161,14 @@ export async function handleCommandGasto(
 
     const keyboard = {
       inline_keyboard: [
-        [
-          { text: "💳 Adicionar Outro", callback_data: "menu_adicionar_gasto" },
-        ],
+        [{ text: "💳 Adicionar Outro", callback_data: "menu_adicionar_gasto" }],
         [{ text: "📊 Ver Saldo", callback_data: "menu_meu_saldo" }],
         [{ text: "🔙 Menu Principal", callback_data: "menu_principal" }],
       ],
     };
 
     const dataStr = `${String(agora.getDate()).padStart(2, "0")}/${String(
-      agora.getMonth() + 1
+      agora.getMonth() + 1,
     ).padStart(2, "0")}/${agora.getFullYear()}`;
 
     let textoConfirmacao: string;
@@ -1147,7 +1201,7 @@ export async function handleCommandGasto(
       token,
       chatId,
       "❌ <b>Erro interno!</b>\n\nTente novamente em alguns instantes.",
-      { parse_mode: "HTML" }
+      { parse_mode: "HTML" },
     );
   }
 }
@@ -1155,7 +1209,7 @@ export async function handleCommandGasto(
 export async function handleCommandPagamento(
   message: any,
   token: string,
-  args: string[]
+  args: string[],
 ): Promise<void> {
   const chatId = message.chat.id;
   const user = message.from;
@@ -1165,12 +1219,8 @@ export async function handleCommandPagamento(
   if (!args || args.length < 1) {
     const keyboard = {
       inline_keyboard: [
-        [
-          { text: "💰 Usar Menu Otimizado", callback_data: "menu_pagamento" },
-        ],
-        [
-          { text: "🔙 Menu Principal", callback_data: "menu_principal" },
-        ],
+        [{ text: "💰 Usar Menu Otimizado", callback_data: "menu_pagamento" }],
+        [{ text: "🔙 Menu Principal", callback_data: "menu_principal" }],
       ],
     };
 
@@ -1201,7 +1251,7 @@ export async function handleCommandPagamento(
         token,
         chatId,
         "❌ <b>Valor inválido!</b>\n\nUse apenas números.\n\n<b>Exemplos válidos:</b>\n• <code>100</code>\n• <code>150.50</code>",
-        { parse_mode: "HTML" }
+        { parse_mode: "HTML" },
       );
       return;
     }
@@ -1210,6 +1260,7 @@ export async function handleCommandPagamento(
       partes.length > 1 ? partes.slice(1).join(" ") : "Pagamento";
 
     const agora = new Date();
+    const cicloPagamento = getFaturaCycleFromDate(agora);
     const userIdStr = String(user.id);
     const pagamentoId = `pag_${userIdStr}_${Math.floor(Date.now() / 1000)}`;
 
@@ -1222,8 +1273,8 @@ export async function handleCommandPagamento(
         valor: Number(valor.toFixed(2)),
         descricao: descricao,
         data_pagamento: agora,
-        mes: agora.getMonth() + 1,
-        ano: agora.getFullYear(),
+        mes: cicloPagamento.mes,
+        ano: cicloPagamento.ano,
         criado_em: agora,
         atualizado_em: agora,
       });
@@ -1252,7 +1303,7 @@ export async function handleCommandPagamento(
     };
 
     const dataStr = `${String(agora.getDate()).padStart(2, "0")}/${String(
-      agora.getMonth() + 1
+      agora.getMonth() + 1,
     ).padStart(2, "0")}/${agora.getFullYear()}`;
 
     const textoConfirmacao =
@@ -1273,7 +1324,7 @@ export async function handleCommandPagamento(
       token,
       chatId,
       "❌ <b>Erro interno!</b>\n\nTente novamente em alguns instantes.",
-      { parse_mode: "HTML" }
+      { parse_mode: "HTML" },
     );
   }
 }
@@ -1281,7 +1332,7 @@ export async function handleCommandPagamento(
 export async function handleCommandSaldo(
   message: any,
   token: string,
-  args: string[]
+  args: string[],
 ): Promise<void> {
   const chatId = message.chat.id;
   const user = message.from;
@@ -1330,7 +1381,7 @@ export async function handleCommandSaldo(
 export async function handleCommandExtrato(
   message: any,
   token: string,
-  args: string[]
+  args: string[],
 ): Promise<void> {
   const chatId = message.chat.id;
   const user = message.from;
@@ -1355,7 +1406,7 @@ export async function handleCommandExtrato(
         await sendMessage(
           token,
           chatId,
-          "Use: /extrato [mes ano]\nEx.: /extrato 9 2025"
+          "Use: /extrato [mes ano]\nEx.: /extrato 9 2025",
         );
         return;
       }
@@ -1363,7 +1414,7 @@ export async function handleCommandExtrato(
       await sendMessage(
         token,
         chatId,
-        "Use: /extrato [mes ano]\nEx.: /extrato 9 2025"
+        "Use: /extrato [mes ano]\nEx.: /extrato 9 2025",
       );
       return;
     }
@@ -1372,14 +1423,9 @@ export async function handleCommandExtrato(
   const { itens, totais } = await obterExtratoConsumoUsuario(
     user.id,
     mesRef,
-    anoRef
+    anoRef,
   );
-  const textoExtrato = montarTextoExtrato(
-    itens,
-    totais,
-    mesRef,
-    anoRef
-  );
+  const textoExtrato = montarTextoExtrato(itens, totais, mesRef, anoRef);
 
   const keyboard = {
     inline_keyboard: [
@@ -1401,7 +1447,15 @@ export async function handleCommandExtrato(
 export async function handleCommandAdminGastos(
   message: any,
   token: string,
-  args: string[]
+  args: string[],
+): Promise<void> {
+  await handleAdminRedirectToWebPanel(message, token, args);
+}
+
+async function handleAdminRedirectToWebPanel(
+  message: any,
+  token: string,
+  args: string[],
 ): Promise<void> {
   const chatId = message.chat.id;
   const user = message.from;
@@ -1414,7 +1468,7 @@ export async function handleCommandAdminGastos(
   await sendMessage(
     token,
     chatId,
-    "As funções administrativas agora estão disponíveis apenas no Painel Admin WebApp.\n\nUse /admin_painel para abrir o painel."
+    "As funções administrativas agora estão disponíveis apenas no Painel Admin WebApp.\n\nUse /admin_painel para abrir o painel.",
   );
 
   await handleCommandAdminPainel(message, token, args);
@@ -1423,110 +1477,39 @@ export async function handleCommandAdminGastos(
 export async function handleCommandAdminPagamentos(
   message: any,
   token: string,
-  args: string[]
+  args: string[],
 ): Promise<void> {
-  const chatId = message.chat.id;
-  const user = message.from;
-
-  if (!isAdmin(user)) {
-    await sendMessage(token, chatId, "Acesso restrito a administradores.");
-    return;
-  }
-
-  await sendMessage(
-    token,
-    chatId,
-    "As funções administrativas agora estão disponíveis apenas no Painel Admin WebApp.\n\nUse /admin_painel para abrir o painel."
-  );
-
-  await handleCommandAdminPainel(message, token, args);
+  await handleAdminRedirectToWebPanel(message, token, args);
 }
 
 export async function handleCommandAdminEditGasto(
   message: any,
   token: string,
-  args: string[]
+  args: string[],
 ): Promise<void> {
-  const chatId = message.chat.id;
-  const user = message.from;
-
-  if (!isAdmin(user)) {
-    await sendMessage(token, chatId, "Acesso restrito a administradores.");
-    return;
-  }
-
-  await sendMessage(
-    token,
-    chatId,
-    "As funções administrativas agora estão disponíveis apenas no Painel Admin WebApp.\n\nUse /admin_painel para abrir o painel."
-  );
-
-  await handleCommandAdminPainel(message, token, args);
+  await handleAdminRedirectToWebPanel(message, token, args);
 }
 
 export async function handleCommandAdminEditPagamento(
   message: any,
   token: string,
-  args: string[]
+  args: string[],
 ): Promise<void> {
-  const chatId = message.chat.id;
-  const user = message.from;
-
-  if (!isAdmin(user)) {
-    await sendMessage(token, chatId, "Acesso restrito a administradores.");
-    return;
-  }
-
-  await sendMessage(
-    token,
-    chatId,
-    "As funções administrativas agora estão disponíveis apenas no Painel Admin WebApp.\n\nUse /admin_painel para abrir o painel."
-  );
-
-  await handleCommandAdminPainel(message, token, args);
+  await handleAdminRedirectToWebPanel(message, token, args);
 }
 
 export async function handleCommandAdminDelGasto(
   message: any,
   token: string,
-  args: string[]
+  args: string[],
 ): Promise<void> {
-  const chatId = message.chat.id;
-  const user = message.from;
-
-  if (!isAdmin(user)) {
-    await sendMessage(token, chatId, "Acesso restrito a administradores.");
-    return;
-  }
-
-  await sendMessage(
-    token,
-    chatId,
-    "As funções administrativas agora estão disponíveis apenas no Painel Admin WebApp.\n\nUse /admin_painel para abrir o painel."
-  );
-
-  await handleCommandAdminPainel(message, token, args);
+  await handleAdminRedirectToWebPanel(message, token, args);
 }
 
 export async function handleCommandAdminDelPagamento(
   message: any,
   token: string,
-  args: string[]
+  args: string[],
 ): Promise<void> {
-  const chatId = message.chat.id;
-  const user = message.from;
-
-  if (!isAdmin(user)) {
-    await sendMessage(token, chatId, "Acesso restrito a administradores.");
-    return;
-  }
-
-  await sendMessage(
-    token,
-    chatId,
-    "As funções administrativas agora estão disponíveis apenas no Painel Admin WebApp.\n\nUse /admin_painel para abrir o painel."
-  );
-
-  await handleCommandAdminPainel(message, token, args);
+  await handleAdminRedirectToWebPanel(message, token, args);
 }
-

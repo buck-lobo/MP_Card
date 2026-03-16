@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
-const fs = require('fs');
-const path = require('path');
-const { execSync } = require('child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 
 // Configurações
 const PACKAGE_PATHS = [
@@ -18,6 +18,79 @@ function readJsonFile(filePath) {
 
 function writeJsonFile(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n');
+}
+
+function tryExecGit(args) {
+  try {
+    const out = execFileSync('git', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf8'
+    });
+    return { ok: true, stdout: out };
+  } catch (err) {
+    const stderr = (err && err.stderr) ? String(err.stderr) : '';
+    const stdout = (err && err.stdout) ? String(err.stdout) : '';
+    return { ok: false, stdout, stderr, err };
+  }
+}
+
+function isInsideGitRepo() {
+  const res = tryExecGit(['rev-parse', '--is-inside-work-tree']);
+  return res.ok && String(res.stdout || '').trim() === 'true';
+}
+
+function parseSemver(version) {
+  if (typeof version !== 'string') return null;
+  const m = version.trim().match(/^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
+  if (!m) return null;
+  return {
+    major: Number(m[1]),
+    minor: Number(m[2]),
+    patch: Number(m[3]),
+  };
+}
+
+function compareSemver(a, b) {
+  const av = parseSemver(a);
+  const bv = parseSemver(b);
+  if (!av || !bv) {
+    return String(a || '').localeCompare(String(b || ''), undefined, { numeric: true });
+  }
+  if (av.major !== bv.major) return av.major - bv.major;
+  if (av.minor !== bv.minor) return av.minor - bv.minor;
+  return av.patch - bv.patch;
+}
+
+function hasDeployRelevantChanges() {
+  // Só exige bump quando houver mudanças no que vai para o deploy (functions/hosting/scripts/firebase.json)
+  if (!isInsideGitRepo()) return true;
+
+  const res = tryExecGit(['diff', '--name-only', 'HEAD']);
+  if (!res.ok) {
+    // Ex.: primeiro commit (sem HEAD) ou git indisponível.
+    return true;
+  }
+  const files = String(res.stdout || '')
+    .split(/\r?\n/)
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  const relevantPrefixes = [
+    'functions/',
+    'admin-webapp/',
+    'scripts/',
+  ];
+  const relevantFiles = new Set([
+    'firebase.json',
+    'package.json',
+    'package-lock.json',
+    'functions/package.json',
+    'functions/package-lock.json',
+    'admin-webapp/package.json',
+    'admin-webapp/package-lock.json',
+  ]);
+
+  return files.some(f => relevantFiles.has(f) || relevantPrefixes.some(p => f.startsWith(p)));
 }
 
 function getPackageInfo(packagePath) {
@@ -48,7 +121,7 @@ class VersionManager {
     return this.packages
       .map(pkg => pkg.data.version || '0.0.0')
       .reduce((max, current) => 
-        current.localeCompare(max, undefined, { numeric: true }) > 0 ? current : max, 
+        compareSemver(current, max) > 0 ? current : max, 
         '0.0.0'
       );
   }
@@ -71,7 +144,14 @@ class VersionManager {
         }
         
         if (this.isPreCommit) {
-          execSync(`git add ${pkg.jsonPath} ${pkg.lockPath}`, { stdio: 'inherit' });
+          const toAdd = [pkg.jsonPath];
+          if (pkg.hasLock) {
+            toAdd.push(pkg.lockPath);
+          }
+          const existing = toAdd.filter(p => fs.existsSync(p));
+          if (existing.length > 0) {
+            execFileSync('git', ['add', ...existing], { stdio: 'inherit' });
+          }
         }
         
         updated = true;
@@ -83,17 +163,30 @@ class VersionManager {
 
   checkVersionBump() {
     if (!this.isPredeploy) return true;
+
+    if (!isInsideGitRepo()) {
+      console.warn('Aviso: repositório git não detectado; pulando verificação de incremento de versão.');
+      return true;
+    }
+
+     if (!hasDeployRelevantChanges()) {
+      console.log('Sem mudanças relevantes para deploy; verificação de bump de versão não é necessária.');
+      return true;
+    }
     
     try {
       const currentVersion = this.packages[0].data.version;
-      const lastVersion = execSync('git show HEAD:package.json 2>/dev/null || echo "{}"')
-        .toString()
-        .trim();
-      
-      const lastVersionJson = JSON.parse(lastVersion || '{}');
-      
-      if (lastVersionJson.version === currentVersion) {
-        console.error('Erro: A versão não foi incrementada. Atualize a versão no package.json');
+      const res = tryExecGit(['show', 'HEAD:package.json']);
+      const lastVersionRaw = (res.ok ? res.stdout : '{}').trim();
+      const lastVersionJson = JSON.parse(lastVersionRaw || '{}');
+
+      if (!lastVersionJson.version) {
+        console.warn('Aviso: não foi possível ler a versão anterior do HEAD; permitindo deploy.');
+        return true;
+      }
+
+      if (compareSemver(currentVersion, lastVersionJson.version) <= 0) {
+        console.error(`Erro: A versão não foi incrementada. Atualize a versão no package.json (atual: ${currentVersion}, HEAD: ${lastVersionJson.version})`);
         return false;
       }
       

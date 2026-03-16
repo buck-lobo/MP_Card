@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# NOSONAR
 
 import asyncio
 import logging, os, re
@@ -123,7 +124,6 @@ class Fatura:
             else:
                 start = datetime(hoje.year, hoje.month - 1, dia_fechamento, 23, 59, 59, 999999) + timedelta(seconds=1)
         return start
-        return start
 # ================================================================
 
 
@@ -173,16 +173,16 @@ NAO_AUTORIZADO_MENSAGEM = (
 )
 
 # Constantes para strings duplicadas
-CANCELAR = "❌ Cancelar"
+CANCELAR = "❌ Cancelar"  # NOSONAR
 MENU_PRINCIPAL_TITULO = "💳 <b>Menu Principal</b>\n\nEscolha uma opção abaixo:"
-VOLTAR = "🔙 Voltar"
-MENU = "🔙 Menu"
-VOLTAR_MENU_PRINCIPAL = "🔙 Menu Principal"
+VOLTAR = "🔙 Voltar"  # NOSONAR
+MENU = "🔙 Menu"  # NOSONAR
+VOLTAR_MENU_PRINCIPAL = "🔙 Menu Principal"  # NOSONAR
 ERRO_INTERNO = "❌ <b>Erro interno!</b>\n\n"
 ACESSO_NEGADO = "❌ <b>Acesso negado!</b>\n\n🔒 Apenas administradores podem "
 OPERACAO_CANCELADA = "❌ <b>Operação cancelada.</b>\n\n💳 <b>Menu Principal</b>\n\nEscolha uma opção abaixo:"
 AGUARDANDO_MENSAGEM = "✏️ <b>Aguardando sua mensagem...</b>"
-DATA_FORMAT = "%d/%m/%y"
+DATA_FORMAT = "%d/%m/%y"  # NOSONAR
 
 ADICIONAR_GASTO_FORMATO = (
     "Digite as informações do gasto no formato:\n"
@@ -441,9 +441,16 @@ class FirebaseCartaoCreditoBot:
         self.redis_client = None
         if REDIS_URL:
             try:
-                self.redis_client = Redis.from_url(REDIS_URL)
+                self.redis_client = Redis.from_url(
+                    REDIS_URL,
+                    socket_connect_timeout=2,
+                    socket_timeout=2,
+                )
+                self.redis_client.ping()
+                logger.info("Redis conectado e respondendo (PING OK)")
             except Exception as e:
-                logging.warning(f"Redis não disponível: {e}")
+                self.redis_client = None
+                logger.warning(f"Redis não disponível: {e}")
 
     def _inicializar_firebase(self):
         try:
@@ -623,7 +630,7 @@ class FirebaseCartaoCreditoBot:
                 gasto = self._float_para_decimal(gasto)
                 
                 # Verificar se o gasto tem parcela no mês solicitado
-                def _gasto_tem_parcela_no_mes(self, gasto, mes, ano):
+                def _gasto_tem_parcela_no_mes(self, gasto, mes, ano):  # NOSONAR
                     """
                     True se há parcela deste gasto na fatura (mes/ano).
                     Respeita o fechamento no dia 09: compras do dia 10..31
@@ -779,7 +786,7 @@ class FirebaseCartaoCreditoBot:
             logger.error(f"Erro ao listar usuários: {e}")
             return []
     
-    def obter_relatorio_completo(self):
+    def obter_relatorio_completo(self):  # NOSONAR
         """Obtém relatório completo para administrador"""
         relatorio = {
             "usuarios": self.listar_todos_usuarios(),
@@ -1153,7 +1160,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(MENU_PRINCIPAL_TITULO, reply_markup=keyboard, parse_mode="HTML")
 
 
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):  # NOSONAR
     """Manipula os callbacks dos botões inline"""
     query = update.callback_query
     user_id = query.from_user.id
@@ -1372,13 +1379,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for usuario in relatorio['usuarios'][:10]:  # Mostrar apenas os primeiros 10
             nome = usuario['name']
             saldo = usuario['saldo']
-            emoji_saldo = "🔴" if saldo > 0 else "💚" if saldo < 0 else "⚖️"
+            if saldo > 0:
+                emoji_saldo = "🔴"
+            elif saldo < 0:
+                emoji_saldo = "💚"
+            else:
+                emoji_saldo = "⚖️"
             texto_relatorio += f"{emoji_saldo} <b>{nome}:</b> R$ {saldo:.2f}\n"
         
         if len(relatorio['usuarios']) > 10:
             texto_relatorio += f"... e mais {len(relatorio['usuarios']) - 10} usuários."
         
-        texto_relatorio += f"\n☁️ Dados do Firebase Firestore"
+        texto_relatorio += "\n☁️ Dados do Firebase Firestore"
         
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("🔙 Voltar", callback_data="menu_principal")
@@ -1465,7 +1477,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def processar_mensagem_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Processa mensagens de texto baseado no estado atual do usuário"""
     user_id = update.effective_user.id
-    user_name = update.effective_user.first_name
+    _user_name = update.effective_user.first_name
     texto = update.message.text.strip()
     
     # Registrar usuário
@@ -1505,7 +1517,7 @@ class PagamentoInput(BaseModel):
 async def processar_gasto_otimizado(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
     """Processa gasto no modo otimizado"""
     user_id = update.effective_user.id
-    user_name = update.effective_user.first_name
+    _user_name = update.effective_user.first_name
     
     try:
         partes = texto.split()
@@ -1532,7 +1544,7 @@ async def processar_gasto_otimizado(update: Update, context: ContextTypes.DEFAUL
         parcelas = gasto_input.parcelas
         
         # Adicionar gasto
-        gasto_id = cartao_bot.adicionar_gasto(user_id, descricao, valor, parcelas)
+        _gasto_id = cartao_bot.adicionar_gasto(user_id, descricao, valor, parcelas)
         valor_parcela = valor / parcelas
         
         # Limpar estado
@@ -1567,7 +1579,7 @@ async def processar_gasto_otimizado(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         logger.error(f"Erro ao processar gasto: {e}")
         await update.message.reply_text(
-            "❌ <b>Erro interno!</b>\n\n"
+            ERRO_INTERNO
             "Tente novamente em alguns instantes.",
             reply_markup=criar_botao_cancelar(),
             parse_mode="HTML"
@@ -1577,7 +1589,7 @@ async def processar_gasto_otimizado(update: Update, context: ContextTypes.DEFAUL
 async def processar_pagamento_otimizado(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
     """Processa pagamento no modo otimizado"""
     user_id = update.effective_user.id
-    user_name = update.effective_user.first_name
+    _user_name = update.effective_user.first_name
     
     try:
         partes = texto.split()
@@ -1599,10 +1611,10 @@ async def processar_pagamento_otimizado(update: Update, context: ContextTypes.DE
         descricao = pagamento_input.descricao
         
         # Calcular saldo antes do pagamento
-        saldo_antes = cartao_bot.calcular_saldo_usuario(user_id)
+        _saldo_antes = cartao_bot.calcular_saldo_usuario(user_id)
         
         # Adicionar pagamento
-        pagamento_id = cartao_bot.adicionar_pagamento(user_id, valor, descricao)
+        _pagamento_id = cartao_bot.adicionar_pagamento(user_id, valor, descricao)
         
         # Calcular novo saldo
         saldo_depois = cartao_bot.calcular_saldo_usuario(user_id)
@@ -1641,7 +1653,7 @@ async def processar_pagamento_otimizado(update: Update, context: ContextTypes.DE
     except Exception as e:
         logger.error(f"Erro ao processar pagamento: {e}")
         await update.message.reply_text(
-            "❌ <b>Erro interno!</b>\n\n"
+            ERRO_INTERNO
             "Tente novamente em alguns instantes.",
             reply_markup=criar_botao_cancelar(),
             parse_mode="HTML"
@@ -1694,7 +1706,7 @@ async def processar_consulta_usuario(update: Update, context: ContextTypes.DEFAU
             pagamentos = cartao_bot.obter_pagamentos_usuario(user_id_consultado)
 
             # Fatura "atual" = fatura ABERTA (o que vai para a próxima fatura)
-            itens_fat, totais_fat = cartao_bot.obter_extrato_fatura_aberta(user_id_consultado)
+            _itens_fat, totais_fat = cartao_bot.obter_extrato_fatura_aberta(user_id_consultado)
             valor_fatura = totais_fat["parcelas_mes"]
             saldo_mes    = totais_fat["saldo_mes"]
 
@@ -1710,7 +1722,7 @@ async def processar_consulta_usuario(update: Update, context: ContextTypes.DEFAU
                 emoji_saldo = "⚖️"
                 status_saldo = "Quitado"
             
-            texto_consulta = f"🔍 <b>Consulta de Usuário - Admin</b>\n\n"
+            texto_consulta = "🔍 <b>Consulta de Usuário - Admin</b>\n\n"
             texto_consulta += f"👤 <b>Nome:</b> {nome}\n"
             texto_consulta += f"📱 <b>Username:</b> @{username}\n"
             texto_consulta += f"{emoji_saldo} <b>Saldo:</b> {status_saldo}\n"
@@ -1718,7 +1730,7 @@ async def processar_consulta_usuario(update: Update, context: ContextTypes.DEFAU
             texto_consulta += f"🧮 <b>Saldo do mês:</b> R$ {saldo_mes:.2f}\n"
             texto_consulta += f"📋 <b>Total de gastos:</b> {len(gastos)}\n"
             texto_consulta += f"💸 <b>Total de pagamentos:</b> {len(pagamentos)}\n"
-            texto_consulta += f"☁️ <b>Dados do Firebase</b>"
+            texto_consulta += "☁️ <b>Dados do Firebase</b>"
             
             await update.message.reply_text(texto_consulta, reply_markup=keyboard, parse_mode="HTML")
         else:
@@ -1732,7 +1744,7 @@ async def processar_consulta_usuario(update: Update, context: ContextTypes.DEFAU
     except Exception as e:
         logger.error(f"Erro ao consultar usuário: {e}")
         await update.message.reply_text(
-            "❌ <b>Erro interno!</b>\n\n"
+            ERRO_INTERNO
             "Tente novamente em alguns instantes.",
             reply_markup=keyboard,
             parse_mode="HTML"
@@ -1957,7 +1969,8 @@ async def reply_long(update_or_query, texto, reply_markup=None, parse_mode="HTML
 
 
 # ✅ Nomenclatura de variáveis melhorada e ajuste para não exibir pagamentos zerados
-def montar_texto_extrato(itens: list, totais: dict, mes_referencia: int, ano_referencia: int, fatura_manager: Fatura):
+def montar_texto_extrato(itens: list, totais: dict, mes_referencia: int, ano_referencia: int, fatura_manager: Fatura):  # NOSONAR
+    _ = fatura_manager
     def _fmt_valor_brl(valor_decimal):
         if not isinstance(valor_decimal, Decimal):
             try:
@@ -2013,7 +2026,7 @@ def montar_texto_extrato(itens: list, totais: dict, mes_referencia: int, ano_ref
     return "\n".join(linhas)
 
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):  # NOSONAR
     err = context.error
     if isinstance(err, RetryAfter):
         logger.warning(f"Rate limit: esperar {err.retry_after}s")

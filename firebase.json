@@ -11,20 +11,40 @@
         "*.local"
       ],
       "predeploy": [
-        "node ./scripts/check-version-bump.cjs",
-        "npm --prefix \"$RESOURCE_DIR\" run build"
+        "node ./scripts/version-manager.cjs --predeploy",
+        "npm --prefix functions run build"
       ]
     }
   ],
   "hosting": {
     "public": "admin-webapp/dist",
+    "headers": [
+      {
+        "source": "/index.html",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache"
+          }
+        ]
+      },
+      {
+        "source": "/assets/**",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=31536000, immutable"
+          }
+        ]
+      }
+    ],
     "ignore": [
       "firebase.json",
       "**/.*",
       "**/node_modules/**"
     ],
     "predeploy": [
-      "node ./scripts/check-version-bump.cjs",
+      "node ./scripts/version-manager.cjs --predeploy",
       "npm --prefix admin-webapp run build"
     ]
   }

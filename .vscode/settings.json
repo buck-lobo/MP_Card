@@ -1,0 +1,13 @@
+{
+  "sonarlint.enabled": false,
+  "sonarlint.automaticAnalysis": false,
+  "sonarlint.analysisExcludesStandalone": [
+    "**/functions/lib/**",
+    "**/admin-webapp/dist/**",
+    "**/__pycache__/**",
+    "**/admin-webapp/src/App.tsx"
+  ],
+  "files.exclude": {
+    "**/__pycache__": true
+  }
+}

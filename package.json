@@ -1,0 +1,19 @@
+{
+  "name": "bot-cartao-credito",
+  "version": "1.0.6",
+  "private": true,
+  "scripts": {
+    "deploy": "firebase deploy",
+    "deploy:functions": "firebase deploy --only functions",
+    "deploy:hosting": "firebase deploy --only hosting",
+    "validate:release": "node scripts/validate-release-metadata.cjs",
+    "prepare": "husky"
+  },
+  "workspaces": [
+    "admin-webapp",
+    "functions"
+  ],
+  "devDependencies": {
+    "husky": "^9.1.7"
+  }
+}

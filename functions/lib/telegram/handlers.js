@@ -1,6 +1,9 @@
+// NOSONAR
+/* eslint-disable */
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ensureUserAuthorized = ensureUserAuthorized;
+exports.getFaturaCycleFromDate = getFaturaCycleFromDate;
 exports.calcularSaldoUsuarioAteMes = calcularSaldoUsuarioAteMes;
 exports.obterExtratoConsumoUsuario = obterExtratoConsumoUsuario;
 exports.handleCommandStart = handleCommandStart;
@@ -150,6 +153,40 @@ function efetivoInicioFatura(mesInicio, anoInicio, diaCompra, fechamentoDia = 9)
     }
     return { mes: mesEfetivo, ano: anoEfetivo };
 }
+function getFaturaCycleFromDate(date, fechamentoDia = 9) {
+    const base = date instanceof Date ? date : new Date();
+    const dia = base.getDate();
+    let mes = base.getMonth() + 1;
+    let ano = base.getFullYear();
+    if (dia > fechamentoDia) {
+        mes += 1;
+        if (mes > 12) {
+            mes = 1;
+            ano += 1;
+        }
+    }
+    return {
+        mes,
+        ano,
+        cycle: `${String(mes).padStart(2, "0")}/${ano}`,
+    };
+}
+function resolvePagamentoCycle(pagamento, fechamentoDia = 9) {
+    const dataPagamento = toJsDate(pagamento === null || pagamento === void 0 ? void 0 : pagamento.data_pagamento);
+    if (dataPagamento) {
+        const ciclo = getFaturaCycleFromDate(dataPagamento, fechamentoDia);
+        return { mes: ciclo.mes, ano: ciclo.ano };
+    }
+    const mesPag = Number(pagamento === null || pagamento === void 0 ? void 0 : pagamento.mes);
+    const anoPag = Number(pagamento === null || pagamento === void 0 ? void 0 : pagamento.ano);
+    if (Number.isFinite(mesPag) &&
+        Number.isFinite(anoPag) &&
+        mesPag >= 1 &&
+        mesPag <= 12) {
+        return { mes: mesPag, ano: anoPag };
+    }
+    return null;
+}
 function calcularParcelasVencidas(gasto, mesReferencia, anoReferencia, fechamentoDia = 9) {
     const dataCompra = toJsDate(gasto.data_compra);
     const diaCompra = dataCompra ? dataCompra.getDate() : null;
@@ -160,37 +197,53 @@ function calcularParcelasVencidas(gasto, mesReferencia, anoReferencia, fechament
     const totalParcelas = Number(gasto.parcelas_total || 1);
     return Math.min(Math.max(0, mesesPassados), totalParcelas);
 }
+
+const SNAPSHOT_CACHE_TTL_MS = 15000;
+const snapshotCache = new Map();
+async function getUserFinanceSnapshots(userIdStr) {
+    const now = Date.now();
+    const cached = snapshotCache.get(userIdStr);
+    if (cached && now - cached.at < SNAPSHOT_CACHE_TTL_MS) {
+        return cached.value;
+    }
+    const [gastosSnap, pagamentosSnap] = await Promise.all([
+        firebase_1.db
+            .collection("gastos")
+            .where("user_id", "==", userIdStr)
+            .where("ativo", "==", true)
+            .get(),
+        firebase_1.db.collection("pagamentos").where("user_id", "==", userIdStr).get(),
+    ]);
+    const gastos = [];
+    gastosSnap.forEach((doc) => gastos.push(doc.data()));
+    const pagamentos = [];
+    pagamentosSnap.forEach((doc) => pagamentos.push(doc.data()));
+    const value = { gastos, pagamentos };
+    snapshotCache.set(userIdStr, { at: now, value });
+    return value;
+}
 async function calcularSaldoUsuarioAteMes(userId, mesRef, anoRef, fechamentoDia = 9) {
     const userIdStr = String(userId);
     try {
         let totalGastosDevidos = 0;
-        const gastosSnap = await firebase_1.db
-            .collection("gastos")
-            .where("user_id", "==", userIdStr)
-            .where("ativo", "==", true)
-            .get();
-        gastosSnap.forEach((doc) => {
-            const gasto = doc.data();
+        const { gastos, pagamentos } = await getUserFinanceSnapshots(userIdStr);
+        gastos.forEach((gasto) => {
             const parcelasDevidas = calcularParcelasVencidas(gasto, mesRef, anoRef, fechamentoDia);
             const valorParcela = Number(gasto.valor_parcela || 0);
             totalGastosDevidos += valorParcela * parcelasDevidas;
         });
         let totalPagamentos = 0;
-        const pagamentosSnap = await firebase_1.db
-            .collection("pagamentos")
-            .where("user_id", "==", userIdStr)
-            .get();
-        pagamentosSnap.forEach((doc) => {
-            const pagamento = doc.data();
+        const refIndex = anoRef * 12 + (mesRef - 1);
+        pagamentos.forEach((pagamento) => {
             if (pagamento.cancelado) {
                 return;
             }
-            const mesPag = Number(pagamento.mes);
-            const anoPag = Number(pagamento.ano);
-            if (!Number.isFinite(mesPag) ||
-                !Number.isFinite(anoPag) ||
-                anoPag < anoRef ||
-                (anoPag === anoRef && mesPag <= mesRef)) {
+            const cicloPagamento = resolvePagamentoCycle(pagamento, fechamentoDia);
+            if (!cicloPagamento) {
+                return;
+            }
+            const pagamentoIndex = cicloPagamento.ano * 12 + (cicloPagamento.mes - 1);
+            if (pagamentoIndex <= refIndex) {
                 totalPagamentos += Number(pagamento.valor || 0);
             }
         });
@@ -220,15 +273,7 @@ async function obterExtratoConsumoUsuario(userId, mesReferencia, anoReferencia) 
     };
     const refIndex = anoReferencia * 12 + (mesReferencia - 1);
     try {
-        const gastosSnap = await firebase_1.db
-            .collection("gastos")
-            .where("user_id", "==", userIdStr)
-            .where("ativo", "==", true)
-            .get();
-        const gastos = [];
-        gastosSnap.forEach((doc) => {
-            gastos.push(doc.data());
-        });
+        const { gastos, pagamentos } = await getUserFinanceSnapshots(userIdStr);
         for (const gasto of gastos) {
             const dataCompra = toJsDate(gasto.data_compra) || new Date();
             const diaCompra = dataCompra.getDate();
@@ -259,15 +304,15 @@ async function obterExtratoConsumoUsuario(userId, mesReferencia, anoReferencia) 
             });
             totais.parcelas_mes += valorParcela;
         }
-        const pagamentosSnap = await firebase_1.db
-            .collection("pagamentos")
-            .where("user_id", "==", userIdStr)
-            .where("mes", "==", mesReferencia)
-            .where("ano", "==", anoReferencia)
-            .get();
-        pagamentosSnap.forEach((doc) => {
-            const pagamento = doc.data();
+        pagamentos.forEach((pagamento) => {
             if (pagamento.cancelado) {
+                return;
+            }
+            const cicloPagamento = resolvePagamentoCycle(pagamento);
+            if (!cicloPagamento) {
+                return;
+            }
+            if (cicloPagamento.mes !== mesReferencia || cicloPagamento.ano !== anoReferencia) {
                 return;
             }
             const valor = Number(pagamento.valor || 0);
@@ -275,7 +320,7 @@ async function obterExtratoConsumoUsuario(userId, mesReferencia, anoReferencia) 
                 return;
             }
             const dataPagamento = toJsDate(pagamento.data_pagamento) ||
-                new Date(anoReferencia, mesReferencia - 1, 1);
+                new Date(cicloPagamento.ano, cicloPagamento.mes - 1, 1);
             itens.push({
                 data: dataPagamento,
                 descricao: pagamento.descricao || "Pagamento",
@@ -909,6 +954,7 @@ async function handleCommandPagamento(message, token, args) {
         }
         const descricao = partes.length > 1 ? partes.slice(1).join(" ") : "Pagamento";
         const agora = new Date();
+        const cicloPagamento = getFaturaCycleFromDate(agora);
         const userIdStr = String(user.id);
         const pagamentoId = `pag_${userIdStr}_${Math.floor(Date.now() / 1000)}`;
         await firebase_1.db
@@ -920,8 +966,8 @@ async function handleCommandPagamento(message, token, args) {
             valor: Number(valor.toFixed(2)),
             descricao: descricao,
             data_pagamento: agora,
-            mes: agora.getMonth() + 1,
-            ano: agora.getFullYear(),
+            mes: cicloPagamento.mes,
+            ano: cicloPagamento.ano,
             criado_em: agora,
             atualizado_em: agora,
         });

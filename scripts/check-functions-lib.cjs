@@ -1,5 +1,5 @@
-const fs = require("fs");
-const path = require("path");
+const fs = require("node:fs");
+const path = require("node:path");
 
 function die(msg) {
   process.stderr.write(`\n${msg}\n`);
@@ -25,6 +25,13 @@ function main() {
     die(
       "Functions build check failed: endpoint 'userRequestAccess' não encontrado em functions/lib/index.js.\n" +
         "Se você acabou de implementar a solicitação de acesso, confirme que o arquivo lib/index.js está atualizado e commitado."
+    );
+  }
+
+  if (content.includes("functions.config(")) {
+    die(
+      "Functions build check failed: uso de 'functions.config()' detectado em functions/lib/index.js.\n" +
+        "Migre para Secrets/variáveis de ambiente (process.env) para evitar bloqueio após Março/2026."
     );
   }
 }

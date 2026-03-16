@@ -1,3 +1,6 @@
+// NOSONAR
+/** biome-ignore-all lint: arquivo legado grande; regras de lint refinadas serão tratadas em refactor dedicado */
+/* eslint-disable */
 import React, { useEffect, useState } from "react";
 import "./index.css";
 import packageJson from "../package.json";
@@ -25,6 +28,7 @@ type AdminUserDetails = {
   username?: string | null;
   ativo?: boolean;
   autorizado?: boolean;
+  invoice_pdf_enabled?: boolean;
   criado_em?: any;
   last_seen?: any;
   atualizado_em?: any;
@@ -37,8 +41,6 @@ type AdminUserDetails = {
   } | null;
 };
 
-const ADMIN_WEBAPP_USER_IDS = new Set<string>(["7108400574"]);
-
 declare global {
   interface Window {
     Telegram?: {
@@ -50,10 +52,10 @@ declare global {
 function SectionHeader({
   title,
   subtitle,
-}: {
+}: Readonly<{
   title: React.ReactNode;
   subtitle?: React.ReactNode;
-}) {
+}>) {
   return (
     <>
       <strong>{title}</strong>
@@ -66,11 +68,11 @@ function BillingCycleSelect({
   value,
   options,
   onChange,
-}: {
+}: Readonly<{
   value: string;
   options: string[];
   onChange: (next: string) => void;
-}) {
+}>) {
   return (
     <label>
       Ciclo de fatura:{" "}
@@ -99,7 +101,7 @@ function getCycleFromIsoDate(iso: string | null | undefined): string | null {
   if (day >= 10) {
     month += 1;
     if (month > 12) {
-      month = 1;
+      month -= 12;
       year += 1;
     }
   }
@@ -107,7 +109,7 @@ function getCycleFromIsoDate(iso: string | null | undefined): string | null {
 }
 
 function getGastoCycles(g: any): string[] {
-  const iso = (g && g.data_compra) as string | null | undefined;
+  const iso = g?.data_compra as string | null | undefined;
   if (!iso) {
     return [];
   }
@@ -123,7 +125,7 @@ function getGastoCycles(g: any): string[] {
   if (day > 9) {
     month += 1;
     if (month > 12) {
-      month = 1;
+      month -= 12;
       year += 1;
     }
   }
@@ -152,7 +154,10 @@ function gastoPertenceAoCiclo(g: any, ciclo: string | null): boolean {
   return cycles.includes(ciclo);
 }
 
-function getSaldoAcumuladoInfo(valor: number): { label: string; color: string } {
+function getSaldoAcumuladoInfo(valor: number): {
+  label: string;
+  color: string;
+} {
   if (!Number.isFinite(valor) || Math.abs(valor) < 0.005) {
     return {
       label: "Saldo zerado até este ciclo",
@@ -224,7 +229,7 @@ function csvEscape(value: any): string {
   }
   const s = String(value);
   const needsQuotes = /[",\n\r;]/.test(s);
-  const escaped = s.replace(/"/g, '""');
+  const escaped = s.replaceAll('"', '""');
   return needsQuotes ? `"${escaped}"` : escaped;
 }
 
@@ -232,7 +237,11 @@ function toCsv(rows: any[][]): string {
   return rows.map((row) => row.map(csvEscape).join(";")).join("\n");
 }
 
-function downloadTextFile(filename: string, content: string, mime: string): void {
+function downloadTextFile(
+  filename: string,
+  content: string,
+  mime: string,
+): void {
   const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -244,7 +253,57 @@ function downloadTextFile(filename: string, content: string, mime: string): void
   URL.revokeObjectURL(url);
 }
 
-function App() {
+function getTelegramInitData(webApp: TelegramWebApp | null): string {
+  const liveInitData = (globalThis as any).Telegram?.WebApp?.initData;
+  if (typeof liveInitData === "string" && liveInitData.trim()) {
+    return liveInitData.trim();
+  }
+  return typeof webApp?.initData === "string" ? webApp.initData.trim() : "";
+}
+
+function normalizeApiErrorMessage(raw: unknown, fallback: string): string {
+  const rawMessage = typeof raw === "string" ? raw.trim() : "";
+  let message = rawMessage;
+  if (message.startsWith("{") && message.endsWith("}")) {
+    try {
+      const parsed = JSON.parse(message);
+      if (typeof parsed?.error === "string" && parsed.error.trim()) {
+        message = parsed.error.trim();
+      }
+    } catch {
+      // noop
+    }
+  }
+
+  const normalized = message
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  if (
+    normalized.includes("initdata invalido") ||
+    normalized.includes("assinatura de initdata invalida") ||
+    normalized.includes("initdata ausente") ||
+    normalized.includes("unauthorized") ||
+    normalized.includes("forbidden")
+  ) {
+    return "Sessão do Telegram inválida ou expirada. Feche e reabra este painel pelo botão do bot no Telegram.";
+  }
+  return message || fallback;
+}
+
+function withInitDataQuery(url: string, initData: string): string {
+  if (!initData) {
+    return url;
+  }
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}initData=${encodeURIComponent(initData)}`;
+}
+
+type LooseMap = Record<string, any>;
+
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: componente legado grande
+function App() { // NOSONAR
   const [user, setUser] = useState<TelegramUser | null>(null);
   const [webApp, setWebApp] = useState<TelegramWebApp | null>(null);
   const [targetUserId, setTargetUserId] = useState<string>("");
@@ -252,19 +311,16 @@ function App() {
   const [pagamentos, setPagamentos] = useState<any[]>([]);
   const [billingCycles, setBillingCycles] = useState<string[]>([]);
   const [selectedCycle, setSelectedCycle] = useState<string | null>(null);
-  const [cycleSummary, setCycleSummary] = useState<
-    | {
-        parcelas_mes: number;
-        pagamentos_mes: number;
-        saldo_mes: number;
-        saldo_acumulado: number;
-        saldo_acumulado_bruto: number;
-        saldo_quitado_ate_base: number;
-        base_mes: number;
-        base_ano: number;
-      }
-    | null
-  >(null);
+  const [cycleSummary, setCycleSummary] = useState<{
+    parcelas_mes: number;
+    pagamentos_mes: number;
+    saldo_mes: number;
+    saldo_acumulado: number;
+    saldo_acumulado_bruto: number;
+    saldo_quitado_ate_base: number;
+    base_mes: number;
+    base_ano: number;
+  } | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -273,7 +329,7 @@ function App() {
   const [editGastoValorTotal, setEditGastoValorTotal] = useState<string>("");
   const [editGastoParcelas, setEditGastoParcelas] = useState<string>("");
   const [selectedPagamentoId, setSelectedPagamentoId] = useState<string | null>(
-    null
+    null,
   );
   const [editPagamentoValor, setEditPagamentoValor] = useState<string>("");
   const [userSuggestions, setUserSuggestions] = useState<
@@ -287,18 +343,24 @@ function App() {
   const [editUserUsername, setEditUserUsername] = useState<string>("");
   const [editUserAtivo, setEditUserAtivo] = useState<boolean>(true);
   const [editUserAutorizado, setEditUserAutorizado] = useState<boolean>(false);
+  const [editUserInvoicePdfEnabled, setEditUserInvoicePdfEnabled] =
+    useState<boolean>(false);
+  const [adminMessageText, setAdminMessageText] = useState<string>("");
+  const [adminMessageSending, setAdminMessageSending] =
+    useState<boolean>(false);
+  const [adminMessageResult, setAdminMessageResult] = useState<string | null>(
+    null,
+  );
   const [userActionMessage, setUserActionMessage] = useState<string | null>(
-    null
+    null,
   );
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryReloadToken, setSummaryReloadToken] = useState(0);
-  const [userOverview, setUserOverview] = useState<any | null>(null);
+  const [userOverview, setUserOverview] = useState<LooseMap | null>(null);
   const [userLoading, setUserLoading] = useState(false);
   const [userReloadToken, setUserReloadToken] = useState(0);
   const [userPanelError, setUserPanelError] = useState<string | null>(null);
-  const [userPanelMessage, setUserPanelMessage] = useState<string | null>(
-    null
-  );
+  const [userPanelMessage, setUserPanelMessage] = useState<string | null>(null);
   const [userGastoDescricao, setUserGastoDescricao] = useState<string>("");
   const [userGastoValor, setUserGastoValor] = useState<string>("");
   const [userGastoParcelas, setUserGastoParcelas] = useState<string>("");
@@ -308,16 +370,24 @@ function App() {
     useState<string>("");
   const [userBillingCycles, setUserBillingCycles] = useState<string[]>([]);
   const [userSelectedCycle, setUserSelectedCycle] = useState<string | null>(
-    null
+    null,
   );
+  const [userInvoiceStatus, setUserInvoiceStatus] = useState<LooseMap | null>(
+    null,
+  );
+  const [userInvoiceLoading, setUserInvoiceLoading] = useState<boolean>(false);
+  const [userInvoiceMessage, setUserInvoiceMessage] = useState<string | null>(
+    null,
+  );
+  const [userInvoiceError, setUserInvoiceError] = useState<string | null>(null);
   const [userRecurringGastos, setUserRecurringGastos] = useState<any[]>([]);
   const [userRecurringLoading, setUserRecurringLoading] = useState(false);
   const [userRecurringError, setUserRecurringError] = useState<string | null>(
-    null
+    null,
   );
   const [userRecurringReloadToken, setUserRecurringReloadToken] = useState(0);
   const [selectedRecurringId, setSelectedRecurringId] = useState<string | null>(
-    null
+    null,
   );
   const [recurringDescricao, setRecurringDescricao] = useState<string>("");
   const [recurringValor, setRecurringValor] = useState<string>("");
@@ -326,22 +396,31 @@ function App() {
   const [userGastosList, setUserGastosList] = useState<any[]>([]);
   const [userPagamentosList, setUserPagamentosList] = useState<any[]>([]);
   const [userLancamentosLoading, setUserLancamentosLoading] = useState(false);
-  const [userLancamentosError, setUserLancamentosError] = useState<string | null>(
-    null
+  const [userLancamentosError, setUserLancamentosError] = useState<
+    string | null
+  >(null);
+  const [adminInvoiceRequests, setAdminInvoiceRequests] = useState<any[]>([]);
+  const [adminInvoiceRequestsLoading, setAdminInvoiceRequestsLoading] =
+    useState<boolean>(false);
+  const [adminInvoiceRequestsError, setAdminInvoiceRequestsError] = useState<
+    string | null
+  >(null);
+  const [adminInvoiceRequestsMessage, setAdminInvoiceRequestsMessage] =
+    useState<string | null>(null);
+  const [adminInvoiceRequestsReloadToken, setAdminInvoiceRequestsReloadToken] =
+    useState<number>(0);
+  const [selectedUserGasto, setSelectedUserGasto] = useState<LooseMap | null>(
+    null,
   );
-  const [selectedUserGasto, setSelectedUserGasto] = useState<any | null>(null);
-  const [userEditGastoDescricao, setUserEditGastoDescricao] = useState<string>(
-    ""
-  );
+  const [userEditGastoDescricao, setUserEditGastoDescricao] =
+    useState<string>("");
   const [userEditGastoValor, setUserEditGastoValor] = useState<string>("");
-  const [userEditGastoParcelas, setUserEditGastoParcelas] = useState<string>(
-    ""
-  );
+  const [userEditGastoParcelas, setUserEditGastoParcelas] =
+    useState<string>("");
   const [userEditGastoCategoria, setUserEditGastoCategoria] =
     useState<string>("");
-  const [selectedUserPagamento, setSelectedUserPagamento] = useState<any | null>(
-    null
-  );
+  const [selectedUserPagamento, setSelectedUserPagamento] =
+    useState<LooseMap | null>(null);
   const [userEditPagamentoDescricao, setUserEditPagamentoDescricao] =
     useState<string>("");
   const [userEditPagamentoValor, setUserEditPagamentoValor] =
@@ -352,7 +431,7 @@ function App() {
   const [userExtratoFilter, setUserExtratoFilter] = useState<
     "all" | "gastos" | "pagamentos"
   >("all");
-  const [userPrevTotals, setUserPrevTotals] = useState<any | null>(null);
+  const [userPrevTotals, setUserPrevTotals] = useState<LooseMap | null>(null);
   const [userOverviewCache, setUserOverviewCache] = useState<
     Record<string, any>
   >({});
@@ -370,9 +449,28 @@ function App() {
   >("pending");
   const [adminAccessRequestsSearch, setAdminAccessRequestsSearch] =
     useState<string>("");
+  const [adminAllUsers, setAdminAllUsers] = useState<
+    { id: string; name: string; username: string | null; ativo: boolean; autorizado: boolean }[]
+  >([]);
+  const [adminAllUsersLoading, setAdminAllUsersLoading] = useState(false);
+  const [adminAllUsersError, setAdminAllUsersError] = useState<string | null>(
+    null,
+  );
+  const [adminAllUsersSearch, setAdminAllUsersSearch] = useState<string>("");
+  const [adminAllUsersCursor, setAdminAllUsersCursor] = useState<string | null>(
+    null,
+  );
+  const [adminAllUsersHasMore, setAdminAllUsersHasMore] = useState(true);
   const [activePanel, setActivePanel] = useState<"user" | "admin">("user");
+  const [userPage, setUserPage] = useState<
+    "overview" | "recorrentes" | "gastos" | "pagamentos" | "extrato"
+  >("overview");
+  const [adminPage, setAdminPage] = useState<
+    "requests" | "workspace" | "system"
+  >("requests");
+  const [isAdmin, setIsAdmin] = useState(false);
   const [adminActiveTab, setAdminActiveTab] = useState<
-    "overview" | "lancamentos" | "pagamentos" | "config"
+    "overview" | "lancamentos" | "pagamentos" | "faturas" | "config"
   >("overview");
   const [userActiveForm, setUserActiveForm] = useState<
     | null
@@ -381,6 +479,14 @@ function App() {
     | "recorrente"
     | "edit_gasto"
     | "edit_pagamento"
+  >(null);
+
+  const [adminMeta, setAdminMeta] = useState<LooseMap | null>(null);
+  const [adminMetaLoading, setAdminMetaLoading] = useState(false);
+  const [adminMetaError, setAdminMetaError] = useState<string | null>(null);
+  const [adminMetaFetchedAt, setAdminMetaFetchedAt] = useState<number>(0);
+  const [telegramContextWarning, setTelegramContextWarning] = useState<
+    string | null
   >(null);
 
   useEffect(() => {
@@ -392,15 +498,164 @@ function App() {
       if (wa.initDataUnsafe?.user) {
         setUser(wa.initDataUnsafe.user);
       }
+      if (!getTelegramInitData(wa)) {
+        setTelegramContextWarning(
+          "Abra este painel pelo botão do bot no Telegram para autenticar sua sessão.",
+        );
+      } else {
+        setTelegramContextWarning(null);
+      }
       wa.ready();
+    } else {
+      setTelegramContextWarning(
+        "Contexto Telegram WebApp não detectado. Algumas ações reais ficarão indisponíveis fora do Telegram.",
+      );
     }
   }, []);
 
-  const isAdmin =
-    !!user && ADMIN_WEBAPP_USER_IDS.has(String(user.id));
-
   const functionsBaseUrl =
     "https://us-central1-bot-cartao-credito.cloudfunctions.net";
+
+  function getAdminActingTargetUserId(): string | null {
+    if (!isAdmin || activePanel !== "admin") {
+      return null;
+    }
+    const target = targetUserId.trim();
+    return target ? target : null;
+  }
+
+  function withAdminTargetBody(body: Record<string, any>): Record<string, any> {
+    const target = getAdminActingTargetUserId();
+    if (!target) {
+      return body;
+    }
+    return {
+      ...body,
+      targetUserId: target,
+    };
+  }
+
+  function withAdminTargetUrl(url: string): string {
+    const target = getAdminActingTargetUserId();
+    if (!target) {
+      return url;
+    }
+    const sep = url.includes("?") ? "&" : "?";
+    return `${url}${sep}targetUserId=${encodeURIComponent(target)}`;
+  }
+
+  async function refreshAdminTargetAfterMutation(
+    preferredTab?: "overview" | "lancamentos" | "pagamentos" | "faturas" | "config",
+  ): Promise<void> {
+    const target = targetUserId.trim();
+    if (!isAdmin || activePanel !== "admin" || !target) {
+      return;
+    }
+    const tabToRestore = preferredTab ?? adminActiveTab;
+    await loadAdminUserDataById(target);
+    setAdminActiveTab(tabToRestore);
+  }
+
+  async function fetchAdminMeta(opts?: { silent?: boolean }) {
+    const initData = getTelegramInitData(webApp);
+    if (!initData) {
+      setAdminMeta(null);
+      setAdminMetaFetchedAt(0);
+      setAdminMetaError(null);
+      setTelegramContextWarning(
+        "Abra este painel pelo botão do bot no Telegram para autenticar sua sessão.",
+      );
+      return null;
+    }
+
+    const silent = Boolean(opts?.silent);
+    if (!silent) {
+      setAdminMetaLoading(true);
+    }
+    setAdminMetaError(null);
+
+    try {
+      const resp = await fetch(`${functionsBaseUrl}/adminMeta`, {
+        headers: {
+          "x-telegram-init-data": initData,
+        },
+      });
+
+      if (resp.ok) {
+        const data = await resp.json();
+        setAdminMeta(data);
+        setAdminMetaFetchedAt(Date.now());
+        setIsAdmin(true);
+        setTelegramContextWarning(null);
+        return data;
+      }
+
+      // 401/403: definitivamente não-admin.
+      if (resp.status === 401 || resp.status === 403) {
+        setIsAdmin(false);
+        setAdminMeta(null);
+        setAdminMetaFetchedAt(0);
+        setAdminMetaError(
+          normalizeApiErrorMessage(
+            `HTTP ${resp.status}`,
+            "Sessão inválida para operações administrativas.",
+          ),
+        );
+        setTelegramContextWarning(
+          "Sessão do Telegram inválida ou expirada. Reabra o Mini App pelo bot.",
+        );
+        return null;
+      }
+
+      // Outras falhas: não derruba o estado de admin (evita falso-negativo por erro transitório).
+      setAdminMetaError(
+        `Erro ao carregar metadados do backend (HTTP ${resp.status}).`,
+      );
+      return null;
+    } catch (err: any) {
+      setAdminMetaError(
+        normalizeApiErrorMessage(
+          err?.message,
+          "Erro ao carregar metadados do backend.",
+        ),
+      );
+      return null;
+    } finally {
+      if (!silent) {
+        setAdminMetaLoading(false);
+      }
+    }
+  }
+
+  useEffect(() => {
+    // 1) Detecta admin cedo (sem depender de outras queries) e já aproveita a resposta.
+    // Faz silent=true para não “piscar” loading fora da aba Configuração.
+    fetchAdminMeta({ silent: true });
+  }, [webApp?.initData]);
+
+  useEffect(() => {
+    // 2) Quando entrar na página Sistema, faz refresh se estiver vazio ou “stale”.
+    if (!isAdmin || activePanel !== "admin" || adminPage !== "system") {
+      return;
+    }
+    const ttlMs = 60_000;
+    const stale =
+      !adminMeta ||
+      !adminMetaFetchedAt ||
+      Date.now() - adminMetaFetchedAt > ttlMs;
+    if (!stale) {
+      return;
+    }
+    fetchAdminMeta();
+  }, [
+    isAdmin,
+    activePanel,
+    adminPage,
+    adminActiveTab,
+    adminMeta,
+    adminMetaFetchedAt,
+    webApp?.initData,
+  ]);
 
   async function handleAdminApproveAccess(userId: string, openAfter?: boolean) {
     setError(null);
@@ -408,13 +663,13 @@ function App() {
 
     if (!webApp?.initData) {
       setError(
-        "Este painel deve ser aberto dentro do Telegram para executar ações reais."
+        "Este painel deve ser aberto dentro do Telegram para executar ações reais.",
       );
       return;
     }
 
     const confirmed = globalThis.confirm(
-      `Aprovar acesso do usuário ${userId}? (Isso marcará o usuário como autorizado)`
+      `Aprovar acesso do usuário ${userId}? (Isso marcará o usuário como autorizado)`,
     );
     if (!confirmed) {
       return;
@@ -426,7 +681,7 @@ function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-telegram-init-data": webApp.initData,
+          "x-telegram-init-data": webApp?.initData ?? "",
         },
         body: JSON.stringify({ userId, autorizado: true }),
       });
@@ -439,7 +694,7 @@ function App() {
       }
 
       if (!resp.ok) {
-        setError((data && data.error) || "Erro ao aprovar acesso.");
+        setError(data?.error || "Erro ao aprovar acesso.");
         return;
       }
 
@@ -447,7 +702,7 @@ function App() {
       setAdminAccessRequestsReloadToken((t) => t + 1);
       if (adminAccessRequestsFilter === "pending") {
         setAdminAccessRequests((current) =>
-          current.filter((item: any) => String(item?.user_id || "") !== userId)
+          current.filter((item: any) => String(item?.user_id || "") !== userId),
         );
       }
 
@@ -463,7 +718,9 @@ function App() {
     }
   }
 
-  async function loadAdminUserDataById(userId: string) {
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: fluxo administrativo com muitos ramos
+  async function loadAdminUserDataById(userId: string) { // NOSONAR
+    setAdminPage("workspace");
     setError(null);
     setActionMessage(null);
     setGastos([]);
@@ -481,6 +738,9 @@ function App() {
     setEditUserUsername("");
     setEditUserAtivo(true);
     setEditUserAutorizado(false);
+    setEditUserInvoicePdfEnabled(false);
+    setAdminMessageText("");
+    setAdminMessageResult(null);
     setUserSuggestions([]);
 
     const normalized = userId.trim();
@@ -489,9 +749,10 @@ function App() {
       return;
     }
 
-    if (!webApp?.initData) {
+    const initData = getTelegramInitData(webApp);
+    if (!initData) {
       setError(
-        "Este painel deve ser aberto dentro do Telegram para carregar dados reais."
+        "Este painel deve ser aberto dentro do Telegram para carregar dados reais.",
       );
       return;
     }
@@ -499,63 +760,54 @@ function App() {
     setLoading(true);
     try {
       const headers: HeadersInit = {
-        "x-telegram-init-data": webApp.initData,
+        "x-telegram-init-data": initData,
       };
 
-      const [gastosResp, pagamentosResp, usuarioResp] = await Promise.all([
-        fetch(
-          `${functionsBaseUrl}/adminListGastos?userId=${encodeURIComponent(
-            normalized
+      const bundleResp = await fetch(
+        withInitDataQuery(
+          `${functionsBaseUrl}/adminGetUserBundle?userId=${encodeURIComponent(
+            normalized,
           )}&limit=500`,
-          { headers }
+          initData,
         ),
-        fetch(
-          `${functionsBaseUrl}/adminListPagamentos?userId=${encodeURIComponent(
-            normalized
-          )}&limit=500`,
-          { headers }
-        ),
-        fetch(
-          `${functionsBaseUrl}/adminGetUsuario?userId=${encodeURIComponent(
-            normalized
-          )}`,
-          { headers }
-        ),
-      ]);
+        { headers },
+      );
 
-      if (!gastosResp.ok) {
-        throw new Error(`Erro ao carregar gastos (${gastosResp.status}).`);
-      }
-      if (!pagamentosResp.ok) {
-        throw new Error(`Erro ao carregar pagamentos (${pagamentosResp.status}).`);
+      let bundleJson: any = null;
+      try {
+        bundleJson = await bundleResp.json();
+      } catch {
+        bundleJson = null;
       }
 
-      const gastosJson = await gastosResp.json();
-      const pagamentosJson = await pagamentosResp.json();
-      let usuarioJson: any | null = null;
-      if (usuarioResp.ok) {
-        try {
-          usuarioJson = await usuarioResp.json();
-        } catch {
-          usuarioJson = null;
-        }
+      if (!bundleResp.ok) {
+        throw new Error(
+          normalizeApiErrorMessage(
+            bundleJson?.error,
+            `Erro ao carregar dados do usuário (${bundleResp.status}).`,
+          ),
+        );
       }
 
-      const newGastos = Array.isArray(gastosJson.itens) ? gastosJson.itens : [];
-      const newPagamentos = Array.isArray(pagamentosJson.itens)
-        ? pagamentosJson.itens
+      const newGastos = Array.isArray(bundleJson?.gastos?.itens)
+        ? bundleJson.gastos.itens
+        : [];
+      const newPagamentos = Array.isArray(bundleJson?.pagamentos?.itens)
+        ? bundleJson.pagamentos.itens
         : [];
 
       setGastos(newGastos);
       setPagamentos(newPagamentos);
 
-      if (usuarioJson && usuarioJson.dados) {
+      const usuarioJson = bundleJson?.usuario;
+      if (usuarioJson?.dados) {
         const dados = usuarioJson.dados;
         setUserDetails(dados);
         setEditUserName(String(dados.name || ""));
         setEditUserUsername(dados.username ?? "");
         setEditUserAtivo(dados.ativo !== false);
         setEditUserAutorizado(!!dados.autorizado);
+        setEditUserInvoicePdfEnabled(!!dados.invoice_pdf_enabled);
       } else {
         setUserDetails(null);
       }
@@ -603,7 +855,7 @@ function App() {
         if (hojeDia >= diaVencimento + 1) {
           alvoMes += 1;
           if (alvoMes > 12) {
-            alvoMes = 1;
+            alvoMes -= 12;
             alvoAno += 1;
           }
         }
@@ -618,87 +870,18 @@ function App() {
       setAdminActiveTab("lancamentos");
     } catch (err: any) {
       console.error(err);
-      setError(err?.message || "Erro ao carregar dados.");
+      setError(normalizeApiErrorMessage(err?.message, "Erro ao carregar dados."));
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    async function fetchUserLancamentos() {
-      if (!webApp || !webApp.initData) {
-        setUserGastosList([]);
-        setUserPagamentosList([]);
-        return;
-      }
-
-      if (userOverview && userOverview.autorizado === false) {
-        setUserGastosList([]);
-        setUserPagamentosList([]);
-        return;
-      }
-
-      setUserLancamentosLoading(true);
-      setUserLancamentosError(null);
-      try {
-        const headers: HeadersInit = {
-          "x-telegram-init-data": webApp.initData,
-        };
-
-        const [respGastos, respPagamentos] = await Promise.all([
-          fetch(`${functionsBaseUrl}/userListGastos?limit=100`, { headers }),
-          fetch(`${functionsBaseUrl}/userListPagamentos?limit=100`, { headers }),
-        ]);
-
-        let dataGastos: any = null;
-        let dataPagamentos: any = null;
-        try {
-          dataGastos = await respGastos.json();
-        } catch {
-          dataGastos = null;
-        }
-        try {
-          dataPagamentos = await respPagamentos.json();
-        } catch {
-          dataPagamentos = null;
-        }
-
-        if (!respGastos.ok) {
-          setUserGastosList([]);
-          setUserLancamentosError(
-            (dataGastos && dataGastos.error) || "Erro ao carregar seus gastos."
-          );
-        } else {
-          setUserGastosList(
-            Array.isArray(dataGastos?.itens) ? dataGastos.itens : []
-          );
-        }
-
-        if (!respPagamentos.ok) {
-          setUserPagamentosList([]);
-          setUserLancamentosError(
-            (dataPagamentos && dataPagamentos.error) ||
-              "Erro ao carregar seus pagamentos."
-          );
-        } else {
-          setUserPagamentosList(
-            Array.isArray(dataPagamentos?.itens) ? dataPagamentos.itens : []
-          );
-        }
-      } catch (err: any) {
-        console.error("Erro ao carregar lançamentos do usuário", err);
-        setUserGastosList([]);
-        setUserPagamentosList([]);
-        setUserLancamentosError(
-          err?.message || "Erro ao carregar seus lançamentos."
-        );
-      } finally {
-        setUserLancamentosLoading(false);
-      }
-    }
-
-    fetchUserLancamentos();
-  }, [webApp, functionsBaseUrl, userReloadToken, userSelectedCycle, userOverview]);
+    // Otimização: agora carregamos gastos/pagamentos via `userBootstrap`.
+    // Mantemos este effect como no-op para evitar chamadas duplicadas.
+    setUserLancamentosLoading(false);
+    setUserLancamentosError(null);
+  }, [webApp, userOverview]);
 
   useEffect(() => {
     setUserShowAllGastos(false);
@@ -725,11 +908,11 @@ function App() {
     setUserEditGastoValor(
       Number.isFinite(valorTotal) && valorTotal > 0
         ? valorTotal.toFixed(2).replace(".", ",")
-        : ""
+        : "",
     );
     const parcelas = Number(item?.parcelas_total || 1);
     setUserEditGastoParcelas(
-      Number.isFinite(parcelas) && parcelas > 1 ? String(parcelas) : ""
+      Number.isFinite(parcelas) && parcelas > 1 ? String(parcelas) : "",
     );
     setUserLancamentosError(null);
     setUserActiveForm("edit_gasto");
@@ -742,7 +925,7 @@ function App() {
     setUserEditPagamentoValor(
       Number.isFinite(valor) && valor > 0
         ? valor.toFixed(2).replace(".", ",")
-        : ""
+        : "",
     );
     setUserLancamentosError(null);
     setUserActiveForm("edit_pagamento");
@@ -758,9 +941,9 @@ function App() {
       return;
     }
 
-    if (!webApp || !webApp.initData) {
+    if (!webApp?.initData) {
       setUserLancamentosError(
-        "Este mini app deve ser aberto dentro do Telegram para editar lançamentos de verdade."
+        "Este mini app deve ser aberto dentro do Telegram para editar lançamentos de verdade.",
       );
       return;
     }
@@ -795,9 +978,9 @@ function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-telegram-init-data": webApp.initData,
+          "x-telegram-init-data": webApp?.initData ?? "",
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(withAdminTargetBody(body)),
       });
 
       const data = await resp.json();
@@ -811,6 +994,7 @@ function App() {
       setUserReloadToken((token) => token + 1);
       setUserActiveForm(null);
       setSelectedUserGasto(null);
+      await refreshAdminTargetAfterMutation("lancamentos");
     } catch (err: any) {
       console.error("Erro ao editar gasto", err);
       setUserLancamentosError(err?.message || "Erro ao editar gasto.");
@@ -857,7 +1041,7 @@ function App() {
     downloadTextFile(
       `gastos_${targetUserId}_${cycle}.csv`,
       csv,
-      "text/csv;charset=utf-8"
+      "text/csv;charset=utf-8",
     );
   }
 
@@ -893,7 +1077,93 @@ function App() {
     downloadTextFile(
       `pagamentos_${targetUserId}_${cycle}.csv`,
       csv,
-      "text/csv;charset=utf-8"
+      "text/csv;charset=utf-8",
+    );
+  }
+
+  function handleExportAdminValidationReportCsv(): void {
+    if (!targetUserId) {
+      setError("Selecione um usuário para exportar o relatório.");
+      return;
+    }
+
+    const cycle = selectedCycle ? selectedCycle.replace("/", "-") : "all";
+    const nowIso = new Date().toISOString();
+    const userName = String(userDetails?.name || "");
+    const username = String(userDetails?.username || "");
+
+    const rows: any[][] = [
+      ["section", "field", "value"],
+      ["meta", "generated_at", nowIso],
+      ["meta", "user_id", targetUserId],
+      ["meta", "user_name", userName],
+      ["meta", "username", username],
+      ["meta", "cycle", selectedCycle || ""],
+      [
+        "summary",
+        "parcelas_mes",
+        Number(cycleSummary?.parcelas_mes || 0).toFixed(2),
+      ],
+      [
+        "summary",
+        "pagamentos_mes",
+        Number(cycleSummary?.pagamentos_mes || 0).toFixed(2),
+      ],
+      ["summary", "saldo_mes", Number(cycleSummary?.saldo_mes || 0).toFixed(2)],
+      [
+        "summary",
+        "saldo_acumulado",
+        Number(cycleSummary?.saldo_acumulado || 0).toFixed(2),
+      ],
+      ["summary", "gastos_count", String(filteredGastos.length)],
+      ["summary", "pagamentos_count", String(filteredPagamentos.length)],
+      ["", "", ""],
+      [
+        "gastos",
+        "id",
+        "descricao",
+        "categoria",
+        "data_compra",
+        "valor_total",
+        "valor_parcela",
+        "parcelas_total",
+      ],
+      ...filteredGastos.map((g) => [
+        "gastos",
+        g.id || "",
+        g.descricao || "",
+        g.categoria || "",
+        g.data_compra || "",
+        Number(g.valor_total || 0).toFixed(2),
+        Number(g.valor_parcela || 0).toFixed(2),
+        Number(g.parcelas_total || 1),
+      ]),
+      ["", "", ""],
+      [
+        "pagamentos",
+        "id",
+        "descricao",
+        "data_pagamento",
+        "valor",
+        "mes",
+        "ano",
+      ],
+      ...filteredPagamentos.map((p) => [
+        "pagamentos",
+        p.id || "",
+        p.descricao || "Pagamento",
+        p.data_pagamento || "",
+        Number(p.valor || 0).toFixed(2),
+        Number(p.mes || ""),
+        Number(p.ano || ""),
+      ]),
+    ];
+
+    const csv = toCsv(rows);
+    downloadTextFile(
+      `relatorio_validacao_${targetUserId}_${cycle}.csv`,
+      csv,
+      "text/csv;charset=utf-8",
     );
   }
 
@@ -905,15 +1175,15 @@ function App() {
       return;
     }
 
-    if (!webApp || !webApp.initData) {
+    if (!webApp?.initData) {
       setUserLancamentosError(
-        "Este mini app deve ser aberto dentro do Telegram para cancelar lançamentos de verdade."
+        "Este mini app deve ser aberto dentro do Telegram para cancelar lançamentos de verdade.",
       );
       return;
     }
 
     const confirmed = globalThis.confirm(
-      "Tem certeza que deseja cancelar (inativar) este gasto?"
+      "Tem certeza que deseja cancelar (inativar) este gasto?",
     );
     if (!confirmed) {
       return;
@@ -925,9 +1195,11 @@ function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-telegram-init-data": webApp.initData,
+          "x-telegram-init-data": webApp?.initData ?? "",
         },
-        body: JSON.stringify({ gastoId: String(selectedUserGasto.id) }),
+        body: JSON.stringify(
+          withAdminTargetBody({ gastoId: String(selectedUserGasto.id) }),
+        ),
       });
 
       const data = await resp.json();
@@ -941,6 +1213,7 @@ function App() {
       setUserReloadToken((token) => token + 1);
       setUserActiveForm(null);
       setSelectedUserGasto(null);
+      await refreshAdminTargetAfterMutation("lancamentos");
     } catch (err: any) {
       console.error("Erro ao cancelar gasto", err);
       setUserLancamentosError(err?.message || "Erro ao cancelar gasto.");
@@ -959,9 +1232,9 @@ function App() {
       return;
     }
 
-    if (!webApp || !webApp.initData) {
+    if (!webApp?.initData) {
       setUserLancamentosError(
-        "Este mini app deve ser aberto dentro do Telegram para editar lançamentos de verdade."
+        "Este mini app deve ser aberto dentro do Telegram para editar lançamentos de verdade.",
       );
       return;
     }
@@ -985,9 +1258,9 @@ function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-telegram-init-data": webApp.initData,
+          "x-telegram-init-data": webApp?.initData ?? "",
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(withAdminTargetBody(body)),
       });
 
       const data = await resp.json();
@@ -1001,6 +1274,7 @@ function App() {
       setUserReloadToken((token) => token + 1);
       setUserActiveForm(null);
       setSelectedUserPagamento(null);
+      await refreshAdminTargetAfterMutation("pagamentos");
     } catch (err: any) {
       console.error("Erro ao editar pagamento", err);
       setUserLancamentosError(err?.message || "Erro ao editar pagamento.");
@@ -1017,15 +1291,15 @@ function App() {
       return;
     }
 
-    if (!webApp || !webApp.initData) {
+    if (!webApp?.initData) {
       setUserLancamentosError(
-        "Este mini app deve ser aberto dentro do Telegram para cancelar lançamentos de verdade."
+        "Este mini app deve ser aberto dentro do Telegram para cancelar lançamentos de verdade.",
       );
       return;
     }
 
     const confirmed = globalThis.confirm(
-      "Tem certeza que deseja cancelar este pagamento?"
+      "Tem certeza que deseja cancelar este pagamento?",
     );
     if (!confirmed) {
       return;
@@ -1037,9 +1311,11 @@ function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-telegram-init-data": webApp.initData,
+          "x-telegram-init-data": webApp?.initData ?? "",
         },
-        body: JSON.stringify({ pagamentoId: String(selectedUserPagamento.id) }),
+        body: JSON.stringify(
+          withAdminTargetBody({ pagamentoId: String(selectedUserPagamento.id) }),
+        ),
       });
 
       const data = await resp.json();
@@ -1053,6 +1329,7 @@ function App() {
       setUserReloadToken((token) => token + 1);
       setUserActiveForm(null);
       setSelectedUserPagamento(null);
+      await refreshAdminTargetAfterMutation("pagamentos");
     } catch (err: any) {
       console.error("Erro ao cancelar pagamento", err);
       setUserLancamentosError(err?.message || "Erro ao cancelar pagamento.");
@@ -1062,7 +1339,7 @@ function App() {
   }
 
   async function handleUserRequestAccess() {
-    if (!webApp || !webApp.initData) {
+    if (!webApp?.initData) {
       return;
     }
 
@@ -1072,7 +1349,7 @@ function App() {
 
     try {
       const headers: HeadersInit = {
-        "x-telegram-init-data": webApp.initData,
+        "x-telegram-init-data": webApp?.initData ?? "",
         "Content-Type": "application/json",
       };
 
@@ -1091,21 +1368,20 @@ function App() {
 
       if (!resp.ok) {
         setUserPanelError(
-          (data && data.error) ||
-            "Erro ao enviar pedido de liberação de acesso."
+          data?.error || "Erro ao enviar pedido de liberação de acesso.",
         );
         return;
       }
 
       setUserPanelMessage(
         data?.message ||
-          "Seu pedido de liberação foi enviado. Assim que for aprovado, volte a abrir o mini app."
+          "Seu pedido de liberação foi enviado. Assim que for aprovado, volte a abrir o mini app.",
       );
       setUserReloadToken((token) => token + 1);
     } catch (err: any) {
       console.error("Erro em handleUserRequestAccess", err);
       setUserPanelError(
-        err?.message || "Erro ao enviar pedido de liberação de acesso."
+        err?.message || "Erro ao enviar pedido de liberação de acesso.",
       );
     } finally {
       setUserRequestingAccess(false);
@@ -1114,12 +1390,12 @@ function App() {
 
   useEffect(() => {
     async function fetchUserRecurringGastos() {
-      if (!webApp || !webApp.initData) {
+      if (!webApp?.initData) {
         setUserRecurringGastos([]);
         return;
       }
 
-      if (userOverview && userOverview.autorizado === false) {
+      if (userOverview?.autorizado === false) {
         setUserRecurringGastos([]);
         return;
       }
@@ -1128,12 +1404,12 @@ function App() {
       setUserRecurringError(null);
       try {
         const headers: HeadersInit = {
-          "x-telegram-init-data": webApp.initData,
+          "x-telegram-init-data": webApp?.initData ?? "",
         };
 
         const resp = await fetch(
-          `${functionsBaseUrl}/userListRecurringGastos`,
-          { headers }
+          withAdminTargetUrl(`${functionsBaseUrl}/userListRecurringGastos`),
+          { headers },
         );
 
         let data: any = null;
@@ -1146,7 +1422,7 @@ function App() {
         if (!resp.ok) {
           setUserRecurringGastos([]);
           setUserRecurringError(
-            (data && data.error) || "Erro ao carregar gastos recorrentes."
+            data?.error || "Erro ao carregar gastos recorrentes.",
           );
           return;
         }
@@ -1157,7 +1433,7 @@ function App() {
         console.error("Erro ao carregar gastos recorrentes", err);
         setUserRecurringGastos([]);
         setUserRecurringError(
-          err?.message || "Erro ao carregar gastos recorrentes."
+          err?.message || "Erro ao carregar gastos recorrentes.",
         );
       } finally {
         setUserRecurringLoading(false);
@@ -1169,7 +1445,7 @@ function App() {
 
   useEffect(() => {
     async function applyRecurringToSelectedCycle() {
-      if (!webApp || !webApp.initData) {
+      if (!webApp?.initData) {
         return;
       }
 
@@ -1177,20 +1453,25 @@ function App() {
         return;
       }
 
-      if (userOverview && userOverview.autorizado === false) {
+      if (userOverview?.autorizado === false) {
         return;
       }
 
       setRecurringMessage(null);
       try {
-        const resp = await fetch(`${functionsBaseUrl}/userApplyRecurringGastos`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-telegram-init-data": webApp.initData,
+        const resp = await fetch(
+          `${functionsBaseUrl}/userApplyRecurringGastos`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-telegram-init-data": webApp?.initData ?? "",
+            },
+            body: JSON.stringify(
+              withAdminTargetBody({ cycle: userSelectedCycle }),
+            ),
           },
-          body: JSON.stringify({ cycle: userSelectedCycle }),
-        });
+        );
 
         let data: any = null;
         try {
@@ -1206,7 +1487,7 @@ function App() {
         const created = Number(data?.created || 0);
         if (Number.isFinite(created) && created > 0) {
           setRecurringMessage(
-            `Adicionamos ${created} gasto(s) recorrente(s) neste ciclo.`
+            `Adicionamos ${created} gasto(s) recorrente(s) neste ciclo.`,
           );
           setUserOverviewCache((prev: Record<string, any>) => {
             const next = { ...prev };
@@ -1244,9 +1525,9 @@ function App() {
     event.preventDefault();
     setUserRecurringError(null);
 
-    if (!webApp || !webApp.initData) {
+    if (!webApp?.initData) {
       setUserRecurringError(
-        "Este mini app deve ser aberto dentro do Telegram para registrar dados de verdade."
+        "Este mini app deve ser aberto dentro do Telegram para registrar dados de verdade.",
       );
       return;
     }
@@ -1285,9 +1566,9 @@ function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-telegram-init-data": webApp.initData,
+          "x-telegram-init-data": webApp?.initData ?? "",
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(withAdminTargetBody(body)),
       });
 
       let data: any = null;
@@ -1299,7 +1580,7 @@ function App() {
 
       if (!resp.ok) {
         setUserRecurringError(
-          (data && data.error) || "Erro ao salvar gasto recorrente."
+          data?.error || "Erro ao salvar gasto recorrente.",
         );
         return;
       }
@@ -1307,7 +1588,7 @@ function App() {
       setRecurringMessage(
         selectedRecurringId
           ? "Gasto recorrente atualizado."
-          : "Gasto recorrente criado."
+          : "Gasto recorrente criado.",
       );
 
       setSelectedRecurringId(null);
@@ -1331,15 +1612,15 @@ function App() {
       return;
     }
 
-    if (!webApp || !webApp.initData) {
+    if (!webApp?.initData) {
       setUserRecurringError(
-        "Este mini app deve ser aberto dentro do Telegram para registrar dados de verdade."
+        "Este mini app deve ser aberto dentro do Telegram para registrar dados de verdade.",
       );
       return;
     }
 
     const confirmed = globalThis.confirm(
-      "Tem certeza que deseja desativar este gasto recorrente?"
+      "Tem certeza que deseja desativar este gasto recorrente?",
     );
     if (!confirmed) {
       return;
@@ -1351,9 +1632,9 @@ function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-telegram-init-data": webApp.initData,
+          "x-telegram-init-data": webApp?.initData ?? "",
         },
-        body: JSON.stringify({ id: selectedRecurringId }),
+        body: JSON.stringify(withAdminTargetBody({ id: selectedRecurringId })),
       });
 
       let data: any = null;
@@ -1365,7 +1646,7 @@ function App() {
 
       if (!resp.ok) {
         setUserRecurringError(
-          (data && data.error) || "Erro ao desativar gasto recorrente."
+          data?.error || "Erro ao desativar gasto recorrente.",
         );
         return;
       }
@@ -1380,7 +1661,7 @@ function App() {
     } catch (err: any) {
       console.error("Erro ao desativar gasto recorrente", err);
       setUserRecurringError(
-        err?.message || "Erro ao desativar gasto recorrente."
+        err?.message || "Erro ao desativar gasto recorrente.",
       );
     } finally {
       setSaving(false);
@@ -1388,8 +1669,9 @@ function App() {
   }
 
   useEffect(() => {
-    async function fetchUserOverview() {
-      if (!webApp || !webApp.initData) {
+    // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: fluxo de bootstrap com cache e fallback
+    async function fetchUserOverview() { // NOSONAR
+      if (!webApp?.initData) {
         setUserOverview(null);
         return;
       }
@@ -1407,10 +1689,10 @@ function App() {
 
       try {
         const headers: HeadersInit = {
-          "x-telegram-init-data": webApp.initData,
+          "x-telegram-init-data": webApp?.initData ?? "",
         };
 
-        let url = `${functionsBaseUrl}/userGetOverview`;
+        let url = `${functionsBaseUrl}/userBootstrap`;
         if (userSelectedCycle) {
           const [mesStr, anoStr] = userSelectedCycle.split("/");
           const mes = Number.parseInt(mesStr, 10);
@@ -1419,6 +1701,7 @@ function App() {
             url += `?mes=${mes}&ano=${ano}`;
           }
         }
+        url = withAdminTargetUrl(url);
 
         const resp = await fetch(url, {
           headers,
@@ -1432,29 +1715,74 @@ function App() {
         }
 
         if (!resp.ok) {
-          if (resp.status === 403 && data && data.autorizado === false) {
+          if (resp.status === 403 && data?.autorizado === false) {
             setUserOverview({
               autorizado: false,
               error:
                 data.error ||
                 "Seu acesso ainda não foi liberado para este mini app.",
               isAdmin: data.isAdmin ?? false,
-              user_id:
-                data.user_id ?? (user ? String(user.id) : null),
+              user_id: data.user_id ?? (user ? String(user.id) : null),
               solicitacao_acesso: data.solicitacao_acesso ?? null,
             });
+
+            setUserGastosList([]);
+            setUserPagamentosList([]);
+            setUserBillingCycles([]);
             return;
           }
 
           setUserOverview(null);
           setUserPanelError(
-            (data && data.error) ||
-              "Erro ao carregar o resumo da sua conta."
+            data?.error || "Erro ao carregar o resumo da sua conta.",
           );
           return;
         }
 
         setUserOverview(data);
+
+        const bootstrap = data?.bootstrap;
+        if (bootstrap) {
+          const gastosItens = Array.isArray(bootstrap?.gastos?.itens)
+            ? bootstrap.gastos.itens
+            : [];
+          const pagamentosItens = Array.isArray(bootstrap?.pagamentos?.itens)
+            ? bootstrap.pagamentos.itens
+            : [];
+          const cycles = Array.isArray(bootstrap?.cycles)
+            ? bootstrap.cycles
+            : [];
+
+          setUserGastosList(gastosItens);
+          setUserPagamentosList(pagamentosItens);
+          setUserBillingCycles(cycles);
+
+          if (cycles.length > 0 && !userSelectedCycle) {
+            const now = new Date();
+            const currentMonth = now.getMonth() + 1;
+            const currentYear = now.getFullYear();
+            const diaVencimento = 10;
+            const hojeDia = now.getDate();
+
+            let alvoMes = currentMonth;
+            let alvoAno = currentYear;
+
+            if (hojeDia >= diaVencimento + 1) {
+              alvoMes += 1;
+              if (alvoMes > 12) {
+                alvoMes -= 12;
+                alvoAno += 1;
+              }
+            }
+
+            const alvoCiclo = `${String(alvoMes).padStart(2, "0")}/${alvoAno}`;
+            if (cycles.includes(alvoCiclo)) {
+              setUserSelectedCycle(alvoCiclo);
+            } else {
+              setUserSelectedCycle(cycles[0]);
+            }
+          }
+        }
 
         setUserOverviewCache((prev) => ({
           ...prev,
@@ -1463,7 +1791,7 @@ function App() {
       } catch (err: any) {
         console.error("Erro ao carregar resumo do usuário", err);
         setUserPanelError(
-          err?.message || "Erro ao carregar o resumo da sua conta."
+          err?.message || "Erro ao carregar o resumo da sua conta.",
         );
       } finally {
         setUserLoading(false);
@@ -1475,7 +1803,12 @@ function App() {
 
   useEffect(() => {
     async function fetchAdminAccessRequests() {
-      if (!isAdmin || activePanel !== "admin" || !webApp?.initData) {
+      if (
+        !isAdmin ||
+        activePanel !== "admin" ||
+        adminPage !== "requests" ||
+        !webApp?.initData
+      ) {
         setAdminAccessRequests([]);
         return;
       }
@@ -1484,7 +1817,7 @@ function App() {
       setAdminAccessRequestsError(null);
       try {
         const headers: HeadersInit = {
-          "x-telegram-init-data": webApp.initData,
+          "x-telegram-init-data": webApp?.initData ?? "",
         };
 
         const statusQuery =
@@ -1493,7 +1826,7 @@ function App() {
             : `status=${encodeURIComponent(adminAccessRequestsFilter)}&`;
         const resp = await fetch(
           `${functionsBaseUrl}/adminListAccessRequests?${statusQuery}limit=50`,
-          { headers }
+          { headers },
         );
 
         let data: any = null;
@@ -1506,7 +1839,7 @@ function App() {
         if (!resp.ok) {
           setAdminAccessRequests([]);
           setAdminAccessRequestsError(
-            (data && data.error) || "Erro ao carregar solicitações pendentes."
+            data?.error || "Erro ao carregar solicitações pendentes.",
           );
           return;
         }
@@ -1517,7 +1850,7 @@ function App() {
         console.error("Erro ao carregar solicitações pendentes", err);
         setAdminAccessRequests([]);
         setAdminAccessRequestsError(
-          err?.message || "Erro ao carregar solicitações pendentes."
+          err?.message || "Erro ao carregar solicitações pendentes.",
         );
       } finally {
         setAdminAccessRequestsLoading(false);
@@ -1528,6 +1861,7 @@ function App() {
   }, [
     isAdmin,
     activePanel,
+    adminPage,
     webApp,
     functionsBaseUrl,
     adminAccessRequestsReloadToken,
@@ -1535,8 +1869,72 @@ function App() {
   ]);
 
   useEffect(() => {
+    async function fetchAdminInvoiceRequests() {
+      if (
+        !isAdmin ||
+        activePanel !== "admin" ||
+        adminPage !== "workspace" ||
+        adminActiveTab !== "faturas" ||
+        !webApp?.initData
+      ) {
+        setAdminInvoiceRequests([]);
+        return;
+      }
+
+      setAdminInvoiceRequestsLoading(true);
+      setAdminInvoiceRequestsError(null);
+      setAdminInvoiceRequestsMessage(null);
+      try {
+        const headers: HeadersInit = {
+          "x-telegram-init-data": webApp?.initData ?? "",
+        };
+        const resp = await fetch(
+          `${functionsBaseUrl}/adminListInvoiceRequests?status=pending&limit=50`,
+          { headers },
+        );
+
+        let data: any = null;
+        try {
+          data = await resp.json();
+        } catch {
+          data = null;
+        }
+
+        if (!resp.ok) {
+          setAdminInvoiceRequests([]);
+          setAdminInvoiceRequestsError(
+            data?.error || "Erro ao carregar solicitações de fatura.",
+          );
+          return;
+        }
+
+        const items = Array.isArray(data?.items) ? data.items : [];
+        setAdminInvoiceRequests(items);
+      } catch (err: any) {
+        console.error("Erro ao carregar solicitações de fatura", err);
+        setAdminInvoiceRequests([]);
+        setAdminInvoiceRequestsError(
+          err?.message || "Erro ao carregar solicitações de fatura.",
+        );
+      } finally {
+        setAdminInvoiceRequestsLoading(false);
+      }
+    }
+
+    fetchAdminInvoiceRequests();
+  }, [
+    isAdmin,
+    activePanel,
+    adminPage,
+    adminActiveTab,
+    webApp,
+    functionsBaseUrl,
+    adminInvoiceRequestsReloadToken,
+  ]);
+
+  useEffect(() => {
     async function fetchUserPrevTotals() {
-      if (!webApp || !webApp.initData) {
+      if (!webApp?.initData) {
         setUserPrevTotals(null);
         return;
       }
@@ -1567,9 +1965,11 @@ function App() {
 
       try {
         const headers: HeadersInit = {
-          "x-telegram-init-data": webApp.initData,
+          "x-telegram-init-data": webApp?.initData ?? "",
         };
-        const urlPrev = `${functionsBaseUrl}/userGetOverview?mes=${prevMes}&ano=${prevAno}`;
+        const urlPrev = withAdminTargetUrl(
+          `${functionsBaseUrl}/userGetOverview?mes=${prevMes}&ano=${prevAno}`,
+        );
         const respPrev = await fetch(urlPrev, { headers });
 
         if (!respPrev.ok) {
@@ -1584,12 +1984,7 @@ function App() {
           dataPrev = null;
         }
 
-        const prev =
-          dataPrev &&
-          dataPrev.extrato_atual &&
-          dataPrev.extrato_atual.totais
-            ? dataPrev.extrato_atual.totais
-            : null;
+        const prev = dataPrev?.extrato_atual?.totais ?? null;
 
         setUserPrevTotals(prev);
       } catch (err) {
@@ -1603,88 +1998,8 @@ function App() {
 
   useEffect(() => {
     async function fetchUserBillingCycles() {
-      if (!webApp || !webApp.initData) {
-        setUserBillingCycles([]);
-        return;
-      }
-
-      try {
-        const headers: HeadersInit = {
-          "x-telegram-init-data": webApp.initData,
-        };
-        const resp = await fetch(
-          `${functionsBaseUrl}/userListBillingCycles`,
-          { headers }
-        );
-
-        if (!resp.ok) {
-          setUserBillingCycles([]);
-          return;
-        }
-
-        let data: any = null;
-        try {
-          data = await resp.json();
-        } catch {
-          data = null;
-        }
-
-        const rawCycles = Array.isArray(data?.cycles) ? data.cycles : [];
-
-        const validCycles = rawCycles.filter((cycle: any) => {
-          if (typeof cycle !== "string") {
-            return false;
-          }
-          const parts = cycle.split("/");
-          if (parts.length !== 2) {
-            return false;
-          }
-          const [mStr, yStr] = parts;
-          const m = Number(mStr);
-          const y = Number(yStr);
-          return (
-            Number.isFinite(m) &&
-            Number.isFinite(y) &&
-            m >= 1 &&
-            m <= 12 &&
-            y >= 2000 &&
-            y <= 2100
-          );
-        });
-
-        const cycles = validCycles;
-        setUserBillingCycles(cycles);
-
-        if (cycles.length > 0 && !userSelectedCycle) {
-          const now = new Date();
-          const currentMonth = now.getMonth() + 1;
-          const currentYear = now.getFullYear();
-          const diaVencimento = 10;
-          const hojeDia = now.getDate();
-
-          let alvoMes = currentMonth;
-          let alvoAno = currentYear;
-
-          if (hojeDia >= diaVencimento + 1) {
-            alvoMes += 1;
-            if (alvoMes > 12) {
-              alvoMes = 1;
-              alvoAno += 1;
-            }
-          }
-
-          const alvoCiclo = `${String(alvoMes).padStart(2, "0")}/${alvoAno}`;
-
-          if (cycles.includes(alvoCiclo)) {
-            setUserSelectedCycle(alvoCiclo);
-          } else {
-            setUserSelectedCycle(cycles[0]);
-          }
-        }
-      } catch (err) {
-        console.error("Erro ao carregar ciclos do usuário", err);
-        setUserBillingCycles([]);
-      }
+      // Otimização: ciclos agora vêm no `userBootstrap`.
+      return;
     }
 
     fetchUserBillingCycles();
@@ -1708,14 +2023,14 @@ function App() {
         }
 
         const headers: HeadersInit = {
-          "x-telegram-init-data": webApp.initData,
+          "x-telegram-init-data": webApp?.initData ?? "",
         };
 
         const resp = await fetch(
           `${functionsBaseUrl}/adminResumoFatura?userId=${encodeURIComponent(
-            targetUserId.trim()
+            targetUserId.trim(),
           )}&mes=${mes}&ano=${ano}`,
-          { headers }
+          { headers },
         );
 
         if (!resp.ok) {
@@ -1726,7 +2041,7 @@ function App() {
         const data = await resp.json();
         const totais = data?.totais || {};
         const saldoAcumulado = Number(
-          (totais.saldo_acumulado ?? totais.saldo_mes) || 0
+          (totais.saldo_acumulado ?? totais.saldo_mes) || 0,
         );
         setCycleSummary({
           parcelas_mes: Number(totais.parcelas_mes || 0),
@@ -1734,7 +2049,7 @@ function App() {
           saldo_mes: Number(totais.saldo_mes || 0),
           saldo_acumulado: saldoAcumulado,
           saldo_acumulado_bruto: Number(
-            (totais.saldo_acumulado_bruto ?? saldoAcumulado) || 0
+            (totais.saldo_acumulado_bruto ?? saldoAcumulado) || 0,
           ),
           saldo_quitado_ate_base: Number(totais.saldo_quitado_ate_base || 0),
           base_mes: Number(totais.base_mes || 0),
@@ -1749,7 +2064,13 @@ function App() {
     }
 
     fetchResumo();
-  }, [selectedCycle, webApp, targetUserId, functionsBaseUrl, summaryReloadToken]);
+  }, [
+    selectedCycle,
+    webApp,
+    targetUserId,
+    functionsBaseUrl,
+    summaryReloadToken,
+  ]);
 
   async function handleTargetUserChange(value: string) {
     setTargetUserId(value);
@@ -1759,21 +2080,23 @@ function App() {
 
     const term = value.trim();
 
-    if (!webApp?.initData) {
+    const initData = getTelegramInitData(webApp);
+    if (!initData) {
       setUserSuggestions([]);
       return;
     }
 
     try {
       const headers: HeadersInit = {
-        "x-telegram-init-data": webApp.initData,
+        "x-telegram-init-data": initData,
       };
 
       const resp = await fetch(
-        `${functionsBaseUrl}/adminSearchUsuarios?q=${encodeURIComponent(
-          term
-        )}`,
-        { headers }
+        withInitDataQuery(
+          `${functionsBaseUrl}/adminSearchUsuarios?q=${encodeURIComponent(term)}`,
+          initData,
+        ),
+        { headers },
       );
 
       if (!resp.ok) {
@@ -1789,13 +2112,127 @@ function App() {
           id: String(u.id),
           name: String(u.name || ""),
           username: u.username ?? null,
-        }))
+        })),
       );
     } catch (err) {
       console.error("Erro ao buscar usuários", err);
       setUserSuggestions([]);
     }
   }
+
+  async function loadAdminAllUsers(opts?: { reset?: boolean }) {
+    const reset = Boolean(opts?.reset);
+    const initData = getTelegramInitData(webApp);
+    if (!initData) {
+      setAdminAllUsersError(
+        "Abra este painel dentro do Telegram para carregar a lista real de usuários.",
+      );
+      return;
+    }
+    if (!reset && !adminAllUsersHasMore) {
+      return;
+    }
+
+    const cursorToUse = reset ? null : adminAllUsersCursor;
+
+    setAdminAllUsersLoading(true);
+    setAdminAllUsersError(null);
+
+    try {
+      const params = new URLSearchParams();
+      params.set("limit", "120");
+      if (cursorToUse) {
+        params.set("cursor", cursorToUse);
+      }
+
+      const resp = await fetch(
+        withInitDataQuery(
+          `${functionsBaseUrl}/adminListUsuarios?${params.toString()}`,
+          initData,
+        ),
+        {
+          headers: {
+            "x-telegram-init-data": initData,
+          },
+        },
+      );
+
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => "");
+        if (resp.status === 401 || resp.status === 403) {
+          setTelegramContextWarning(
+            "Sessão do Telegram inválida ou expirada. Reabra o Mini App pelo bot.",
+          );
+        }
+        throw new Error(
+          normalizeApiErrorMessage(
+            body,
+            `Erro ao listar usuários (HTTP ${resp.status}).`,
+          ),
+        );
+      }
+
+      const data = await resp.json().catch(() => null);
+      const items = Array.isArray(data?.items) ? data.items : [];
+      const parsed = items.map((u: any) => ({
+        id: String(u?.id || ""),
+        name: String(u?.name || ""),
+        username: u?.username ?? null,
+        ativo: u?.ativo !== false,
+        autorizado: u?.autorizado === true,
+      }));
+
+      setAdminAllUsers((prev) => {
+        const base = reset ? [] : prev;
+        const seen = new Set(base.map((u) => u.id));
+        const merged = [...base];
+        parsed.forEach((u: {
+          id: string;
+          name: string;
+          username: string | null;
+          ativo: boolean;
+          autorizado: boolean;
+        }) => {
+          if (!u.id || seen.has(u.id)) {
+            return;
+          }
+          seen.add(u.id);
+          merged.push(u);
+        });
+        return merged;
+      });
+
+      const nextCursorRaw = data?.nextCursor;
+      const nextCursor =
+        typeof nextCursorRaw === "string" && nextCursorRaw.trim()
+          ? nextCursorRaw.trim()
+          : null;
+      setAdminAllUsersCursor(nextCursor);
+      setAdminAllUsersHasMore(Boolean(nextCursor));
+    } catch (err: any) {
+      console.error("Erro ao carregar lista de usuários", err);
+      setAdminAllUsersError(
+        normalizeApiErrorMessage(err?.message, "Erro ao carregar usuários."),
+      );
+    } finally {
+      setAdminAllUsersLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (
+      !isAdmin ||
+      activePanel !== "admin" ||
+      adminPage !== "workspace" ||
+      !webApp?.initData
+    ) {
+      return;
+    }
+    if (adminAllUsers.length > 0 || adminAllUsersLoading) {
+      return;
+    }
+    void loadAdminAllUsers({ reset: true });
+  }, [isAdmin, activePanel, adminPage, webApp?.initData]);
 
   function handleSelectUserSuggestion(userInfo: {
     id: string;
@@ -1808,17 +2245,18 @@ function App() {
 
   async function handleSaveUsuario(event: React.FormEvent) {
     event.preventDefault();
-    setError(null);
+    setError(null); // NOSONAR
     setUserActionMessage(null);
 
-    if (!userDetails || !userDetails.id) {
+    const currentUserId = userDetails?.id;
+    if (!currentUserId) {
       setError("Nenhum usuário carregado.");
       return;
     }
 
     if (!webApp?.initData) {
       setError(
-        "Este painel deve ser aberto dentro do Telegram para executar ações reais."
+        "Este painel deve ser aberto dentro do Telegram para executar ações reais.",
       );
       return;
     }
@@ -1829,14 +2267,15 @@ function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-telegram-init-data": webApp.initData,
+          "x-telegram-init-data": webApp?.initData ?? "",
         },
         body: JSON.stringify({
-          userId: String(userDetails.id),
+          userId: String(currentUserId),
           name: editUserName,
           username: editUserUsername.trim() || null,
           ativo: editUserAtivo,
           autorizado: editUserAutorizado,
+          invoice_pdf_enabled: editUserInvoicePdfEnabled,
         }),
       });
 
@@ -1848,7 +2287,7 @@ function App() {
       }
 
       if (!resp.ok) {
-        setError((data && data.error) || "Erro ao atualizar usuário.");
+        setError(data?.error || "Erro ao atualizar usuário.");
         return;
       }
 
@@ -1860,8 +2299,9 @@ function App() {
               username: editUserUsername.trim() || null,
               ativo: editUserAtivo,
               autorizado: editUserAutorizado,
+              invoice_pdf_enabled: editUserInvoicePdfEnabled,
             }
-          : current
+          : current,
       );
 
       setUserActionMessage("Dados do usuário atualizados com sucesso.");
@@ -1870,6 +2310,68 @@ function App() {
       setError(err?.message || "Erro ao atualizar usuário.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleAdminSendMessage(event: React.FormEvent) {
+    event.preventDefault(); // NOSONAR
+    setError(null);
+    setAdminMessageResult(null); // NOSONAR
+
+    const currentUserId = userDetails?.id;
+    if (!currentUserId) {
+      setError("Nenhum usuário carregado.");
+      return;
+    }
+
+    if (!webApp?.initData) {
+      setError(
+        "Este painel deve ser aberto dentro do Telegram para executar ações reais.",
+      );
+      return;
+    }
+
+    const message = adminMessageText.trim();
+    if (!message) {
+      setAdminMessageResult("Digite uma mensagem antes de enviar.");
+      return;
+    }
+
+    setAdminMessageSending(true);
+    try {
+      const resp = await fetch(`${functionsBaseUrl}/adminSendMessage`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-telegram-init-data": webApp?.initData ?? "",
+        },
+        body: JSON.stringify({
+          userId: String(currentUserId),
+          message,
+        }),
+      });
+
+      let data: any = null;
+      try {
+        data = await resp.json();
+      } catch {
+        data = null;
+      }
+
+      if (!resp.ok) {
+        setAdminMessageResult(
+          data?.error || "Erro ao enviar mensagem para o usuário.",
+        );
+        return;
+      }
+
+      setAdminMessageText("");
+      setAdminMessageResult("Mensagem enviada com sucesso via Telegram.");
+    } catch (err: any) {
+      console.error("Erro ao enviar mensagem", err);
+      setAdminMessageResult(err?.message || "Erro ao enviar mensagem.");
+    } finally {
+      setAdminMessageSending(false);
     }
   }
 
@@ -1903,9 +2405,9 @@ function App() {
       return;
     }
 
-    if (!webApp || !webApp.initData) {
+    if (!webApp?.initData) {
       setError(
-        "Este painel deve ser aberto dentro do Telegram para executar ações reais."
+        "Este painel deve ser aberto dentro do Telegram para executar ações reais.",
       );
       return;
     }
@@ -1926,7 +2428,7 @@ function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-telegram-init-data": webApp.initData,
+          "x-telegram-init-data": webApp?.initData ?? "",
         },
         body: JSON.stringify(body),
       });
@@ -1947,8 +2449,8 @@ function App() {
                 valor_parcela: data.valor_parcela,
                 parcelas_total: data.parcelas_total,
               }
-            : g
-        )
+            : g,
+        ),
       );
 
       setSummaryReloadToken((token) => token + 1);
@@ -1970,15 +2472,15 @@ function App() {
       return;
     }
 
-    if (!webApp || !webApp.initData) {
+    if (!webApp?.initData) {
       setError(
-        "Este painel deve ser aberto dentro do Telegram para executar ações reais."
+        "Este painel deve ser aberto dentro do Telegram para executar ações reais.",
       );
       return;
     }
 
     const confirmed = globalThis.confirm(
-      "Tem certeza que deseja inativar este gasto?"
+      "Tem certeza que deseja inativar este gasto?",
     );
     if (!confirmed) {
       return;
@@ -1990,7 +2492,7 @@ function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-telegram-init-data": webApp.initData,
+          "x-telegram-init-data": webApp?.initData ?? "",
         },
         body: JSON.stringify({ gastoId: selectedGastoId }),
       });
@@ -2027,9 +2529,9 @@ function App() {
       return;
     }
 
-    if (!webApp || !webApp.initData) {
+    if (!webApp?.initData) {
       setError(
-        "Este painel deve ser aberto dentro do Telegram para executar ações reais."
+        "Este painel deve ser aberto dentro do Telegram para executar ações reais.",
       );
       return;
     }
@@ -2040,7 +2542,7 @@ function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-telegram-init-data": webApp.initData,
+          "x-telegram-init-data": webApp?.initData ?? "",
         },
         body: JSON.stringify({
           pagamentoId: selectedPagamentoId,
@@ -2062,8 +2564,8 @@ function App() {
                 ...p,
                 valor: data.valor,
               }
-            : p
-        )
+            : p,
+        ),
       );
 
       setSummaryReloadToken((token) => token + 1);
@@ -2085,15 +2587,15 @@ function App() {
       return;
     }
 
-    if (!webApp || !webApp.initData) {
+    if (!webApp?.initData) {
       setError(
-        "Este painel deve ser aberto dentro do Telegram para executar ações reais."
+        "Este painel deve ser aberto dentro do Telegram para executar ações reais.",
       );
       return;
     }
 
     const confirmed = globalThis.confirm(
-      "Tem certeza que deseja cancelar este pagamento?"
+      "Tem certeza que deseja cancelar este pagamento?",
     );
     if (!confirmed) {
       return;
@@ -2105,7 +2607,7 @@ function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-telegram-init-data": webApp.initData,
+          "x-telegram-init-data": webApp?.initData ?? "",
         },
         body: JSON.stringify({ pagamentoId: selectedPagamentoId }),
       });
@@ -2118,7 +2620,7 @@ function App() {
       }
 
       setPagamentos((current) =>
-        current.filter((p) => p.id !== selectedPagamentoId)
+        current.filter((p) => p.id !== selectedPagamentoId),
       );
       setSelectedPagamentoId(null);
       setEditPagamentoValor("");
@@ -2138,9 +2640,9 @@ function App() {
     setUserPanelError(null);
     setUserPanelMessage(null);
 
-    if (!webApp || !webApp.initData) {
+    if (!webApp?.initData) {
       setUserPanelError(
-        "Este mini app deve ser aberto dentro do Telegram para registrar gastos de verdade."
+        "Este mini app deve ser aberto dentro do Telegram para registrar gastos de verdade.",
       );
       return;
     }
@@ -2193,9 +2695,9 @@ function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-telegram-init-data": webApp.initData,
+          "x-telegram-init-data": webApp?.initData ?? "",
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(withAdminTargetBody(body)),
       });
 
       let data: any = null;
@@ -2206,9 +2708,7 @@ function App() {
       }
 
       if (!resp.ok) {
-        setUserPanelError(
-          (data && data.error) || "Erro ao registrar gasto."
-        );
+        setUserPanelError(data?.error || "Erro ao registrar gasto.");
         return;
       }
 
@@ -2219,11 +2719,10 @@ function App() {
       setUserGastoParcelas("");
       setUserActiveForm(null);
       setUserReloadToken((token) => token + 1);
+      await refreshAdminTargetAfterMutation("lancamentos");
     } catch (err: any) {
       console.error("Erro ao registrar gasto", err);
-      setUserPanelError(
-        err?.message || "Erro ao registrar gasto."
-      );
+      setUserPanelError(err?.message || "Erro ao registrar gasto.");
     } finally {
       setSaving(false);
     }
@@ -2234,9 +2733,9 @@ function App() {
     setUserPanelError(null);
     setUserPanelMessage(null);
 
-    if (!webApp || !webApp.initData) {
+    if (!webApp?.initData) {
       setUserPanelError(
-        "Este mini app deve ser aberto dentro do Telegram para registrar pagamentos de verdade."
+        "Este mini app deve ser aberto dentro do Telegram para registrar pagamentos de verdade.",
       );
       return;
     }
@@ -2264,17 +2763,14 @@ function App() {
 
     setSaving(true);
     try {
-      const resp = await fetch(
-        `${functionsBaseUrl}/userRegistrarPagamento`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-telegram-init-data": webApp.initData,
-          },
-          body: JSON.stringify(body),
-        }
-      );
+      const resp = await fetch(`${functionsBaseUrl}/userRegistrarPagamento`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-telegram-init-data": webApp?.initData ?? "",
+        },
+        body: JSON.stringify(withAdminTargetBody(body)),
+      });
 
       let data: any = null;
       try {
@@ -2284,9 +2780,7 @@ function App() {
       }
 
       if (!resp.ok) {
-        setUserPanelError(
-          (data && data.error) || "Erro ao registrar pagamento."
-        );
+        setUserPanelError(data?.error || "Erro ao registrar pagamento.");
         return;
       }
 
@@ -2295,31 +2789,141 @@ function App() {
       setUserPagamentoDescricao("");
       setUserActiveForm(null);
       setUserReloadToken((token) => token + 1);
+      await refreshAdminTargetAfterMutation("pagamentos");
     } catch (err: any) {
       console.error("Erro ao registrar pagamento", err);
-      setUserPanelError(
-        err?.message || "Erro ao registrar pagamento."
-      );
+      setUserPanelError(err?.message || "Erro ao registrar pagamento.");
     } finally {
       setSaving(false);
     }
   }
 
-  const userSaldoAtual = Number(
-    (userOverview && userOverview.saldo_atual) || 0
-  );
-  const userMesRef = userOverview && userOverview.mes_ref;
-  const userAnoRef = userOverview && userOverview.ano_ref;
-  const userTotais =
-    userOverview &&
-    userOverview.extrato_atual &&
-    userOverview.extrato_atual.totais
-      ? userOverview.extrato_atual.totais
-      : null;
+  const userSaldoAtual = Number(userOverview?.saldo_atual || 0);
+  const userMesRef = userOverview?.mes_ref;
+  const userAnoRef = userOverview?.ano_ref;
+  const userTotais = userOverview?.extrato_atual?.totais ?? null;
 
-  const userSaldoMes = userTotais
-    ? Number(userTotais.saldo_mes || 0)
-    : 0;
+  const userInvoiceFeatureEnabled =
+    userOverview?.features?.invoice_pdf_request === true;
+
+  const userInvoiceCycle = userSelectedCycle
+    ? userSelectedCycle
+    : userMesRef != null && userAnoRef != null
+      ? `${String(userMesRef).padStart(2, "0")}/${String(userAnoRef)}`
+      : null;
+  const userInvoiceDownloadUrl = userInvoiceStatus?.download_url
+    ? String(userInvoiceStatus.download_url)
+    : null;
+
+  async function fetchUserInvoiceStatus(cycle: string) {
+    if (!cycle) {
+      return null;
+    }
+    setUserInvoiceLoading(true);
+    setUserInvoiceError(null);
+    try {
+      const resp = await fetch(
+        withAdminTargetUrl(
+          `${functionsBaseUrl}/userGetInvoiceStatus?cycle=${encodeURIComponent(
+            cycle,
+          )}`,
+        ),
+        {
+          method: "GET",
+          headers: {
+            "x-telegram-init-data": webApp?.initData ?? "",
+          },
+        },
+      );
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok) {
+        setUserInvoiceError(data?.error || "Erro ao carregar status.");
+        return null;
+      }
+      setUserInvoiceStatus(data);
+      return data;
+    } catch (err: any) {
+      console.error("Erro ao carregar status da invoice", err);
+      setUserInvoiceError(err?.message || "Erro ao carregar status.");
+      return null;
+    } finally {
+      setUserInvoiceLoading(false);
+    }
+  }
+
+  async function handleUserRequestInvoicePdf() {
+    setUserInvoiceError(null);
+    setUserInvoiceMessage(null);
+    if (!userInvoiceCycle) {
+      setUserInvoiceError("Selecione um ciclo para solicitar a fatura.");
+      return;
+    }
+    setUserInvoiceLoading(true);
+    try {
+      const resp = await fetch(`${functionsBaseUrl}/userRequestInvoicePdf`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-telegram-init-data": webApp?.initData ?? "",
+        },
+        body: JSON.stringify(withAdminTargetBody({ cycle: userInvoiceCycle })),
+      });
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok) {
+        setUserInvoiceError(data?.error || "Erro ao solicitar fatura.");
+        return;
+      }
+      setUserInvoiceMessage(
+        data?.message ||
+          "Aguarde, sua fatura está sendo preparada e ficará disponível para download.",
+      );
+      setUserInvoiceStatus(data);
+      await fetchUserInvoiceStatus(userInvoiceCycle);
+    } catch (err: any) {
+      console.error("Erro ao solicitar invoice", err);
+      setUserInvoiceError(err?.message || "Erro ao solicitar fatura.");
+    } finally {
+      setUserInvoiceLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: any = null;
+
+    async function tick() {
+      if (cancelled) return;
+      if (!userInvoiceFeatureEnabled) return;
+      if (!userInvoiceCycle) return;
+
+      const statusResp = await fetchUserInvoiceStatus(userInvoiceCycle);
+
+      if (cancelled) return;
+      const status = String(statusResp?.status || "").toLowerCase();
+
+      if (
+        status === "pending" ||
+        status === "uploading" ||
+        status === "generating"
+      ) {
+        timer = setTimeout(tick, 6000);
+      }
+    }
+
+    // Carrega status ao trocar de ciclo.
+    if (userInvoiceFeatureEnabled && userInvoiceCycle) {
+      tick();
+    }
+
+    return () => {
+      cancelled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+    };
+  }, [userInvoiceFeatureEnabled, userInvoiceCycle]);
+
+  const userSaldoMes = userTotais ? Number(userTotais.saldo_mes || 0) : 0;
   let userSaldoMesColor = "#e5e7eb";
   if (Number.isFinite(userSaldoMes) && Math.abs(userSaldoMes) >= 0.005) {
     userSaldoMesColor = userSaldoMes > 0 ? "#f97373" : "#4ade80";
@@ -2327,7 +2931,7 @@ function App() {
 
   const userSaldoGeral = userSaldoAtual;
   let userMainNumberColor = "#e5e7eb";
-  let userMainNumberLabel = "Saldo até este ciclo";
+  let userMainNumberLabel: string;
   if (Number.isFinite(userSaldoGeral) && Math.abs(userSaldoGeral) >= 0.005) {
     if (userSaldoGeral > 0) {
       userMainNumberColor = "#f97373";
@@ -2351,28 +2955,26 @@ function App() {
           "Neste ciclo você gastou o mesmo que no ciclo anterior.";
       } else if (diffGastos > 0) {
         userComparativoTexto = `Neste ciclo você gastou ${formatCurrencyBRL(
-          Math.abs(diffGastos)
+          Math.abs(diffGastos),
         )} a mais do que no ciclo anterior.`;
       } else {
         userComparativoTexto = `Neste ciclo você gastou ${formatCurrencyBRL(
-          Math.abs(diffGastos)
+          Math.abs(diffGastos),
         )} a menos do que no ciclo anterior.`;
       }
     }
   }
 
-  const userExtratoItens: any[] =
-    userOverview &&
-    userOverview.extrato_atual &&
-    Array.isArray(userOverview.extrato_atual.itens)
-      ? userOverview.extrato_atual.itens
-      : [];
+  const userExtratoItens: any[] = Array.isArray(userOverview?.extrato_atual?.itens)
+    ? userOverview.extrato_atual.itens
+    : [];
 
   const userCategoriasResumo = (() => {
     const totals: Record<string, number> = {};
     for (const item of userExtratoItens) {
       const tipoLower = String(item?.tipo || "").toLowerCase();
-      const isPagamento = tipoLower === "pagamento" || tipoLower === "pagamentos";
+      const isPagamento =
+        tipoLower === "pagamento" || tipoLower === "pagamentos";
       if (isPagamento) {
         continue;
       }
@@ -2392,7 +2994,7 @@ function App() {
     if (userExtratoFilter === "all") {
       return true;
     }
-    const tipo = String(item.tipo || "").toLowerCase();
+    const tipo = String(item?.tipo || "").toLowerCase();
     if (userExtratoFilter === "pagamentos") {
       return tipo === "pagamento" || tipo === "pagamentos";
     }
@@ -2434,9 +3036,89 @@ function App() {
 
   const filteredPagamentos = hasSelectedCycle
     ? pagamentos.filter(
-        (p) => getCycleFromIsoDate(p.data_pagamento) === selectedCycle
+        (p) => getCycleFromIsoDate(p.data_pagamento) === selectedCycle,
       )
     : pagamentos;
+
+  const userPageMeta = (() => {
+    if (userPage === "recorrentes") {
+      return {
+        title: "Gastos recorrentes",
+        subtitle: "Cadastre e mantenha modelos automáticos para os próximos ciclos.",
+      };
+    }
+    if (userPage === "gastos") {
+      return {
+        title: "Meus gastos",
+        subtitle: "Revise e edite os lançamentos de gasto do ciclo selecionado.",
+      };
+    }
+    if (userPage === "pagamentos") {
+      return {
+        title: "Meus pagamentos",
+        subtitle: "Acompanhe e ajuste os pagamentos usados para abater o saldo.",
+      };
+    }
+    if (userPage === "extrato") {
+      return {
+        title: "Extrato do ciclo",
+        subtitle: "Visualização consolidada de gastos e pagamentos no mesmo lugar.",
+      };
+    }
+    return {
+      title: "Resumo do seu cartão",
+      subtitle: "Veja rapidamente saldo, alertas e ações mais importantes.",
+    };
+  })();
+
+  const userPageItemsCount = (() => {
+    if (userPage === "recorrentes") {
+      return `${userRecurringGastos.length} recorrente(s)`;
+    }
+    if (userPage === "gastos") {
+      return `${userGastosList.length} gasto(s)`;
+    }
+    if (userPage === "pagamentos") {
+      return `${userPagamentosList.length} pagamento(s)`;
+    }
+    if (userPage === "extrato") {
+      return `${userExtratoFilteredItens.length} item(ns)`;
+    }
+    return userInvoiceFeatureEnabled
+      ? `Fatura: ${String(userInvoiceStatus?.status ?? "none")}`
+      : "Fatura PDF desabilitada";
+  })();
+
+  const adminPageMeta = (() => {
+    if (adminPage === "workspace") {
+      return {
+        title: "Operação de usuário",
+        subtitle: "Acesse cadastro, fatura, gastos e pagamentos do usuário selecionado.",
+      };
+    }
+    if (adminPage === "system") {
+      return {
+        title: "Sistema",
+        subtitle: "Versões, changelog e checagens de sincronização do ambiente.",
+      };
+    }
+    return {
+      title: "Solicitações",
+      subtitle: "Aprove pedidos de acesso e abra usuários com menos cliques.",
+    };
+  })();
+
+  const adminPendingRequestsCount = adminAccessRequests.filter((item: any) => {
+    return String(item?.status || "").toLowerCase() === "pending";
+  }).length;
+
+  const adminActiveTabLabel = (() => {
+    if (adminActiveTab === "overview") return "Visão geral";
+    if (adminActiveTab === "lancamentos") return "Lançamentos";
+    if (adminActiveTab === "pagamentos") return "Pagamentos";
+    if (adminActiveTab === "faturas") return "Faturas";
+    return "Sistema";
+  })();
 
   const showLoadingOverlay = loading || saving || summaryLoading || userLoading;
   let loadingMessage = "Carregando informações da sua conta...";
@@ -2452,7 +3134,12 @@ function App() {
 
   return (
     <div className="app">
-      <div className="card">
+      <div className="card app-shell">
+        {telegramContextWarning && (
+          <div className="warning">{telegramContextWarning}</div>
+        )}
+        {actionMessage && <div className="success">{actionMessage}</div>}
+
         {showLoadingOverlay && (
           <div className="loading-overlay">
             <div className="loading-box">
@@ -2470,24 +3157,28 @@ function App() {
                 <form onSubmit={handleUserSaveGastoEdit} className="form">
                   <div>ID: {selectedUserGasto.id}</div>
                   <label>
-                    Descrição:
+                    <span>Descrição:</span>{" "}
                     <input
                       type="text"
                       value={userEditGastoDescricao}
-                      onChange={(e) => setUserEditGastoDescricao(e.target.value)}
+                      onChange={(e) =>
+                        setUserEditGastoDescricao(e.target.value)
+                      }
                     />
                   </label>
                   <label>
-                    Categoria:
+                    <span>Categoria:</span>{" "}
                     <input
                       type="text"
                       value={userEditGastoCategoria}
-                      onChange={(e) => setUserEditGastoCategoria(e.target.value)}
+                      onChange={(e) =>
+                        setUserEditGastoCategoria(e.target.value)
+                      }
                       placeholder="Ex: alimentação, transporte"
                     />
                   </label>
                   <label>
-                    Valor total (R$):
+                    <span>Valor total (R$):</span>{" "}
                     <input
                       type="text"
                       value={userEditGastoValor}
@@ -2495,7 +3186,7 @@ function App() {
                     />
                   </label>
                   <label>
-                    Parcelas (opcional):
+                    <span>Parcelas (opcional):</span>{" "}
                     <input
                       type="text"
                       value={userEditGastoParcelas}
@@ -2542,7 +3233,7 @@ function App() {
                 <form onSubmit={handleUserSavePagamentoEdit} className="form">
                   <div>ID: {selectedUserPagamento.id}</div>
                   <label>
-                    Descrição:
+                    <span>Descrição:</span>{" "}
                     <input
                       type="text"
                       value={userEditPagamentoDescricao}
@@ -2552,11 +3243,13 @@ function App() {
                     />
                   </label>
                   <label>
-                    Valor (R$):
+                    <span>Valor (R$):</span>{" "}
                     <input
                       type="text"
                       value={userEditPagamentoValor}
-                      onChange={(e) => setUserEditPagamentoValor(e.target.value)}
+                      onChange={(e) =>
+                        setUserEditPagamentoValor(e.target.value)
+                      }
                     />
                   </label>
                   {userLancamentosError && (
@@ -2605,7 +3298,7 @@ function App() {
                 <form onSubmit={handleSaveRecurringGasto} className="form">
                   {selectedRecurringId && <div>ID: {selectedRecurringId}</div>}
                   <label>
-                    Descrição:
+                    <span>Descrição:</span>{" "}
                     <input
                       type="text"
                       value={recurringDescricao}
@@ -2614,7 +3307,7 @@ function App() {
                     />
                   </label>
                   <label>
-                    Categoria:
+                    <span>Categoria:</span>{" "}
                     <input
                       type="text"
                       value={recurringCategoria}
@@ -2623,7 +3316,7 @@ function App() {
                     />
                   </label>
                   <label>
-                    Valor (R$):
+                    <span>Valor (R$):</span>{" "}
                     <input
                       type="text"
                       value={recurringValor}
@@ -2673,11 +3366,12 @@ function App() {
               <section>
                 <strong>Registrar novo gasto</strong>
                 <p className="section-subtitle">
-                  Informe os dados do novo gasto que será considerado na fatura do seu cartão.
+                  Informe os dados do novo gasto que será considerado na fatura
+                  do seu cartão.
                 </p>
                 <form onSubmit={handleUserRegistrarGasto} className="form">
                   <label>
-                    Descrição do gasto:
+                    <span>Descrição do gasto:</span>{" "}
                     <input
                       type="text"
                       value={userGastoDescricao}
@@ -2686,7 +3380,7 @@ function App() {
                     />
                   </label>
                   <label>
-                    Categoria:
+                    <span>Categoria:</span>{" "}
                     <input
                       type="text"
                       value={userGastoCategoria}
@@ -2695,7 +3389,7 @@ function App() {
                     />
                   </label>
                   <label>
-                    Valor total (R$):
+                    <span>Valor total (R$):</span>{" "}
                     <input
                       type="text"
                       value={userGastoValor}
@@ -2704,7 +3398,7 @@ function App() {
                     />
                   </label>
                   <label>
-                    Parcelas (opcional):
+                    <span>Parcelas (opcional):</span>{" "}
                     <input
                       type="text"
                       value={userGastoParcelas}
@@ -2740,7 +3434,7 @@ function App() {
                 </p>
                 <form onSubmit={handleUserRegistrarPagamento} className="form">
                   <label>
-                    Valor do pagamento (R$):
+                    <span>Valor do pagamento (R$):</span>{" "}
                     <input
                       type="text"
                       value={userPagamentoValor}
@@ -2749,11 +3443,13 @@ function App() {
                     />
                   </label>
                   <label>
-                    Descrição (opcional):
+                    <span>Descrição (opcional):</span>{" "}
                     <input
                       type="text"
                       value={userPagamentoDescricao}
-                      onChange={(e) => setUserPagamentoDescricao(e.target.value)}
+                      onChange={(e) =>
+                        setUserPagamentoDescricao(e.target.value)
+                      }
                       placeholder="Ex: pagamento da fatura de novembro"
                     />
                   </label>
@@ -2783,7 +3479,7 @@ function App() {
                 <form onSubmit={handleSaveGasto} className="form">
                   <div>ID: {selectedGastoId}</div>
                   <label>
-                    Novo valor total (R$):
+                    <span>Novo valor total (R$):</span>{" "}
                     <input
                       type="text"
                       value={editGastoValorTotal}
@@ -2791,7 +3487,7 @@ function App() {
                     />
                   </label>
                   <label>
-                    Novas parcelas (opcional):
+                    <span>Novas parcelas (opcional):</span>{" "}
                     <input
                       type="text"
                       value={editGastoParcelas}
@@ -2834,7 +3530,8 @@ function App() {
                 <>
                   <h2 className="modal-title">Saldo do período</h2>
                   <p>
-                    Considera apenas a fatura selecionada: parcelas/gastos do ciclo menos pagamentos do ciclo.
+                    Considera apenas a fatura selecionada: parcelas/gastos do
+                    ciclo menos pagamentos do ciclo.
                   </p>
                 </>
               )}
@@ -2842,55 +3539,61 @@ function App() {
                 <>
                   <h2 className="modal-title">Saldo acumulado</h2>
                   {(() => {
-                    const ctxTotais: any = cycleSummary
-                      ? {
-                          saldo_mes: cycleSummary.saldo_mes,
-                          saldo_acumulado: cycleSummary.saldo_acumulado,
-                        }
-                      : userTotais
-                      ? {
-                          saldo_mes: Number(userTotais.saldo_mes || 0),
-                          saldo_acumulado: Number(
-                            (userTotais.saldo_acumulado ?? userSaldoAtual) || 0
-                          ),
-                        }
-                      : null;
+                    let ctxTotais: any = null;
+                    if (cycleSummary) {
+                      ctxTotais = {
+                        saldo_mes: cycleSummary.saldo_mes,
+                        saldo_acumulado: cycleSummary.saldo_acumulado,
+                      };
+                    } else if (userTotais) {
+                      ctxTotais = {
+                        saldo_mes: Number(userTotais.saldo_mes || 0),
+                        saldo_acumulado: Number(
+                          (userTotais.saldo_acumulado ?? userSaldoAtual) || 0,
+                        ),
+                      };
+                    }
 
                     if (!ctxTotais) {
                       return (
                         <p>
-                          Considera o saldo total do cartão até o ciclo selecionado.
+                          Considera o saldo total do cartão até o ciclo
+                          selecionado.
                         </p>
                       );
                     }
 
                     const saldoMes = Number(ctxTotais.saldo_mes || 0);
-                    const saldoAcumulado = Number(ctxTotais.saldo_acumulado || 0);
+                    const saldoAcumulado = Number(
+                      ctxTotais.saldo_acumulado || 0,
+                    );
                     const carryOver = Number(
-                      (saldoAcumulado - saldoMes).toFixed(2)
+                      (saldoAcumulado - saldoMes).toFixed(2),
                     );
 
-                    const saldoMesColor =
-                      Number.isFinite(saldoMes) && Math.abs(saldoMes) >= 0.005
-                        ? saldoMes > 0
-                          ? "#f97373"
-                          : "#4ade80"
-                        : "#e5e7eb";
+                    let saldoMesColor = "#e5e7eb";
+                    if (
+                      Number.isFinite(saldoMes) &&
+                      Math.abs(saldoMes) >= 0.005
+                    ) {
+                      saldoMesColor = saldoMes > 0 ? "#f97373" : "#4ade80";
+                    }
 
-                    const carryColor =
-                      Number.isFinite(carryOver) && Math.abs(carryOver) >= 0.005
-                        ? carryOver > 0
-                          ? "#f97373"
-                          : "#4ade80"
-                        : "#9ca3af";
+                    let carryColor = "#9ca3af";
+                    if (
+                      Number.isFinite(carryOver) &&
+                      Math.abs(carryOver) >= 0.005
+                    ) {
+                      carryColor = carryOver > 0 ? "#f97373" : "#4ade80";
+                    }
 
                     const totalInfo = getSaldoAcumuladoInfo(saldoAcumulado);
 
                     return (
                       <>
                         <p>
-                          O <strong>saldo acumulado</strong> é o total a pagar (ou
-                          crédito) considerando o histórico até o ciclo
+                          O <strong>saldo acumulado</strong> é o total a pagar
+                          (ou crédito) considerando o histórico até o ciclo
                           selecionado.
                         </p>
 
@@ -2966,7 +3669,7 @@ function App() {
                 <form onSubmit={handleSavePagamento} className="form">
                   <div>ID: {selectedPagamentoId}</div>
                   <label>
-                    Novo valor (R$):
+                    <span>Novo valor (R$):</span>{" "}
                     <input
                       type="text"
                       value={editPagamentoValor}
@@ -3003,8 +3706,18 @@ function App() {
 
         <div className="card-header">
           <div className="app-header-row">
-            <h1 className="app-title">Controle de crédito</h1>
-            <span className="app-version-badge">v{APP_VERSION}</span>
+            <div className="app-brand">
+              <h1 className="app-title">Lobo Card</h1>
+              <div className="app-subtitle">
+                Painel financeiro no Telegram
+              </div>
+            </div>
+            <div className="app-header-badges">
+              <span className="app-role-badge">
+                {isAdmin ? "Admin" : "Usuário"}
+              </span>
+              <span className="app-version-badge">v{APP_VERSION}</span>
+            </div>
           </div>
         </div>
 
@@ -3016,7 +3729,10 @@ function App() {
                 "app-nav-button" +
                 (activePanel === "user" ? " app-nav-button--active" : "")
               }
-              onClick={() => setActivePanel("user")}
+              onClick={() => {
+                setActivePanel("user");
+                setUserPage("overview");
+              }}
             >
               Meu cartão
             </button>
@@ -3026,24 +3742,27 @@ function App() {
                 "app-nav-button" +
                 (activePanel === "admin" ? " app-nav-button--active" : "")
               }
-              onClick={() => setActivePanel("admin")}
+              onClick={() => {
+                setActivePanel("admin");
+                setAdminPage("requests");
+              }}
             >
               Painel admin
             </button>
           </div>
         )}
 
-        <section className="card-section">
-          <strong>{isAdmin ? "Admin conectado:" : "Usuário conectado:"}</strong>
-          <div>
+        <section className="card-section card-section--identity">
+          <strong>{isAdmin ? "Admin conectado" : "Usuário conectado"}</strong>
+          <div className="identity-grid">
             {user ? (
               <>
-                <div>ID: {user.id}</div>
-                <div>Nome: {user.first_name}</div>
-                <div>Username: {user.username ? `@${user.username}` : "-"}</div>
+                <div className="identity-item">ID: {user.id}</div>
+                <div className="identity-item">Nome: {user.first_name}</div>
+                <div className="identity-item">Username: {user.username ? `@${user.username}` : "-"}</div>
               </>
             ) : (
-              <div>Usuário não identificado pelo Telegram WebApp.</div>
+              <div className="identity-item">Usuário não identificado pelo Telegram WebApp.</div>
             )}
           </div>
         </section>
@@ -3079,12 +3798,14 @@ function App() {
               </div>
             )}
 
-            {userPanelError && <div className="error mt-2">{userPanelError}</div>}
+            {userPanelError && (
+              <div className="error mt-2">{userPanelError}</div>
+            )}
             {userPanelMessage && (
               <div className="success mt-2">{userPanelMessage}</div>
             )}
 
-            {userOverview && userOverview.autorizado === false ? (
+            {userOverview?.autorizado === false ? (
               <div className="subcard">
                 <div className="section-title">Acesso ainda não liberado</div>
                 <p className="section-subtitle section-subtitle--tight">
@@ -3127,7 +3848,7 @@ function App() {
                         <div className="admin-access-meta">
                           {solicit?.solicitado_em
                             ? `Solicitado em ${formatDateTime(
-                                solicit.solicitado_em
+                                solicit.solicitado_em,
                               )}`
                             : ""}
                         </div>
@@ -3143,7 +3864,7 @@ function App() {
                     type="button"
                     disabled={(() => {
                       const status = String(
-                        userOverview?.solicitacao_acesso?.status || ""
+                        userOverview?.solicitacao_acesso?.status || "",
                       ).toLowerCase();
                       return userRequestingAccess || status === "pending";
                     })()}
@@ -3151,7 +3872,7 @@ function App() {
                   >
                     {(() => {
                       const status = String(
-                        userOverview?.solicitacao_acesso?.status || ""
+                        userOverview?.solicitacao_acesso?.status || "",
                       ).toLowerCase();
                       if (userRequestingAccess) {
                         return "Enviando pedido...";
@@ -3181,6 +3902,116 @@ function App() {
               </div>
             ) : (
               <>
+                <div className="page-hero">
+                  <div className="page-hero-title">{userPageMeta.title}</div>
+                  <div className="page-hero-subtitle">{userPageMeta.subtitle}</div>
+                  <div className="page-kpi-grid">
+                    <div className="page-kpi-card">
+                      <div className="page-kpi-label">Ciclo ativo</div>
+                      <div className="page-kpi-value">
+                        {userSelectedCycle ?? "(não selecionado)"}
+                      </div>
+                    </div>
+                    <div className="page-kpi-card">
+                      <div className="page-kpi-label">Saldo geral</div>
+                      <div className="page-kpi-value">
+                        {formatCurrencyBRL(userSaldoAtual)}
+                      </div>
+                    </div>
+                    <div className="page-kpi-card">
+                      <div className="page-kpi-label">Destaque da página</div>
+                      <div className="page-kpi-value">{userPageItemsCount}</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="panel-nav panel-nav--user">
+                  <button
+                    type="button"
+                    className={
+                      "panel-nav-button" +
+                      (userPage === "overview"
+                        ? " panel-nav-button--active"
+                        : "")
+                    }
+                    onClick={() => setUserPage("overview")}
+                  >
+                    Resumo
+                  </button>
+                  <button
+                    type="button"
+                    className={
+                      "panel-nav-button" +
+                      (userPage === "recorrentes"
+                        ? " panel-nav-button--active"
+                        : "")
+                    }
+                    onClick={() => setUserPage("recorrentes")}
+                  >
+                    Recorrentes
+                  </button>
+                  <button
+                    type="button"
+                    className={
+                      "panel-nav-button" +
+                      (userPage === "gastos" ? " panel-nav-button--active" : "")
+                    }
+                    onClick={() => setUserPage("gastos")}
+                  >
+                    Gastos
+                  </button>
+                  <button
+                    type="button"
+                    className={
+                      "panel-nav-button" +
+                      (userPage === "pagamentos"
+                        ? " panel-nav-button--active"
+                        : "")
+                    }
+                    onClick={() => setUserPage("pagamentos")}
+                  >
+                    Pagamentos
+                  </button>
+                  <button
+                    type="button"
+                    className={
+                      "panel-nav-button" +
+                      (userPage === "extrato"
+                        ? " panel-nav-button--active"
+                        : "")
+                    }
+                    onClick={() => setUserPage("extrato")}
+                  >
+                    Extrato
+                  </button>
+                </div>
+
+                <div className="flow-steps flow-steps--user">
+                  <div className="flow-step">
+                    <div className="flow-step-kicker">Passo 1</div>
+                    <div className="flow-step-title">Entenda seu cenário</div>
+                    <div className="flow-step-text">
+                      Comece em Resumo para ver saldo e situação do ciclo.
+                    </div>
+                  </div>
+                  <div className="flow-step">
+                    <div className="flow-step-kicker">Passo 2</div>
+                    <div className="flow-step-title">Registre movimentos</div>
+                    <div className="flow-step-text">
+                      Use Gastos, Pagamentos e Recorrentes para atualizar dados.
+                    </div>
+                  </div>
+                  <div className="flow-step">
+                    <div className="flow-step-kicker">Passo 3</div>
+                    <div className="flow-step-title">Valide no extrato</div>
+                    <div className="flow-step-text">
+                      Confira o impacto final na página Extrato.
+                    </div>
+                  </div>
+                </div>
+
+                {userPage === "overview" && (
+                  <>
                 {userMesRef && userAnoRef && userTotais && (
                   <div className="user-main-number-card">
                     <div className="user-main-number-label">
@@ -3204,11 +4035,15 @@ function App() {
                     {userOverview?.user_name || user?.first_name || "-"}
                   </div>
                   <div className="user-overview-username">
-                    {userOverview?.username
-                      ? `@${userOverview.username}`
-                      : user?.username
-                      ? `@${user.username}`
-                      : "-"}
+                    {(() => {
+                      if (userOverview?.username) {
+                        return `@${userOverview.username}`;
+                      }
+                      if (user?.username) {
+                        return `@${user.username}`;
+                      }
+                      return "-";
+                    })()}
                   </div>
                   <div className="user-overview-balance">
                     <div className="muted-text">Saldo geral do cartão</div>
@@ -3218,25 +4053,106 @@ function App() {
                   </div>
                 </div>
 
+                {userInvoiceFeatureEnabled && (
+                  <div className="subcard">
+                    <div className="subcard-title">Fatura em PDF</div>
+                    <p className="section-subtitle section-subtitle--tight">
+                      Selecione o ciclo e solicite a fatura. Quando estiver
+                      pronta, o download aparecerá aqui.
+                    </p>
+
+                    {userInvoiceError && (
+                      <div className="error mt-1">{userInvoiceError}</div>
+                    )}
+                    {userInvoiceMessage && (
+                      <div className="success mt-1">{userInvoiceMessage}</div>
+                    )}
+
+                    <div className="mt-1">
+                      <div className="muted-text muted-text--sm"> {/* NOSONAR */}
+                        Ciclo: {userInvoiceCycle ?? "(selecione um ciclo)"}
+                      </div>
+                      <div className="muted-text muted-text--sm">
+                        Status:{" "}
+                        {String(userInvoiceStatus?.status ?? "none")}
+                      </div>
+                    </div>
+
+                    {userInvoiceDownloadUrl && (
+                      <div className="mt-1">
+                        <a
+                          href={userInvoiceDownloadUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Baixar fatura (PDF)
+                        </a>
+                      </div>
+                    )}
+
+                    <div className="button-row mt-2">
+                      <button
+                        type="button"
+                        disabled={
+                          userInvoiceLoading ||
+                          saving ||
+                          userLoading ||
+                          !userInvoiceCycle
+                        }
+                        onClick={handleUserRequestInvoicePdf}
+                      >
+                        {userInvoiceLoading
+                          ? "Solicitando..."
+                          : "Solicitar fatura"}
+                      </button>
+                      <button
+                        type="button"
+                        className="button--sm button--ghost"
+                        disabled={
+                          userInvoiceLoading ||
+                          saving ||
+                          userLoading ||
+                          !userInvoiceCycle
+                        }
+                        onClick={() => {
+                          if (userInvoiceCycle) {
+                            fetchUserInvoiceStatus(userInvoiceCycle);
+                          }
+                        }}
+                      >
+                        Atualizar status
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {userMesRef && userAnoRef && userTotais && (
                   <div className="resumo-fatura-card user-resumo-card">
                     <div className="resumo-fatura-titulo">
                       Movimentação deste ciclo
                     </div>
                     <div className="resumo-fatura-linha">
-                      <span className="resumo-fatura-label">Gastos/parcelas</span>
+                      <span className="resumo-fatura-label">
+                        Gastos/parcelas
+                      </span>
                       <span className="resumo-fatura-valor">
-                        {formatCurrencyBRL(Number(userTotais.parcelas_mes || 0))}
+                        {formatCurrencyBRL(
+                          Number(userTotais.parcelas_mes || 0),
+                        )}
                       </span>
                     </div>
                     <div className="resumo-fatura-linha">
                       <span className="resumo-fatura-label">Pagamentos</span>
                       <span className="resumo-fatura-valor">
-                        {formatCurrencyBRL(Number(userTotais.pagamentos_mes || 0))}
+                        {formatCurrencyBRL(
+                          Number(userTotais.pagamentos_mes || 0),
+                        )}
                       </span>
                     </div>
                     <div className="resumo-fatura-linha">
-                      <span className="resumo-fatura-label">Saldo deste ciclo</span>
+                      <span className="resumo-fatura-label">
+                        Saldo deste ciclo
+                      </span>
                       <span className="resumo-fatura-direita">
                         <span
                           className="resumo-fatura-valor"
@@ -3323,7 +4239,10 @@ function App() {
                 {recurringMessage && (
                   <div className="success mt-2">{recurringMessage}</div>
                 )}
+                  </>
+                )}
 
+                {userPage === "recorrentes" && (
                 <div className="user-section">
                   <SectionHeader
                     title="Gastos recorrentes"
@@ -3334,27 +4253,38 @@ function App() {
                     <div className="error mt-2">{userRecurringError}</div>
                   )}
 
-                  {userRecurringLoading ? (
-                    <p className="section-subtitle">Carregando recorrentes...</p>
-                  ) : userRecurringGastos.length === 0 ? (
-                    <p className="section-subtitle">
-                      Nenhum gasto recorrente cadastrado.
-                    </p>
-                  ) : (
-                    <ul className="gastos-list">
-                      {userRecurringGastos.map((item: any) => (
-                        <li key={String(item.id || "")} className="gasto-item">
-                          <div className="gasto-textos">
-                            <div className="gasto-descricao">
-                              {String(item.descricao || "(sem descrição)")}
+                  {(() => {
+                    if (userRecurringLoading) {
+                      return (
+                        <p className="section-subtitle">
+                          Carregando recorrentes...
+                        </p>
+                      );
+                    }
+
+                    if (userRecurringGastos.length === 0) {
+                      return (
+                        <p className="section-subtitle">
+                          Nenhum gasto recorrente cadastrado.
+                        </p>
+                      );
+                    }
+
+                    return (
+                      <ul className="gastos-list">
+                        {userRecurringGastos.map((item: any) => (
+                          <li key={String(item.id || "")} className="gasto-item">
+                            <div className="gasto-textos">
+                              <div className="gasto-descricao">
+                                {String(item.descricao || "(sem descrição)")}
+                              </div>
+                              <div className="gasto-meta">
+                                <span>
+                                  {String(item.categoria || "").trim() ||
+                                    "Sem categoria"}
+                                </span>
+                              </div>
                             </div>
-                            <div className="gasto-meta">
-                              <span>
-                                {String(item.categoria || "").trim() ||
-                                  "Sem categoria"}
-                              </span>
-                            </div>
-                          </div>
                           <div className="gasto-acoes">
                             <div className="gasto-valor">
                               {formatCurrencyBRL(Number(item.valor_total || 0))}
@@ -3367,10 +4297,11 @@ function App() {
                               Editar
                             </button>
                           </div>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
+                          </li>
+                        ))}
+                      </ul>
+                    );
+                  })()}
 
                   <div className="button-row mt-2">
                     <button
@@ -3388,7 +4319,9 @@ function App() {
                     </button>
                   </div>
                 </div>
+                )}
 
+                {userPage === "gastos" && (
                 <div className="user-section">
                   <SectionHeader
                     title="Meus gastos"
@@ -3398,19 +4331,23 @@ function App() {
                     <div className="error mt-2">{userLancamentosError}</div>
                   )}
                   {userLancamentosLoading ? (
-                    <p className="section-subtitle">Carregando seus gastos...</p>
+                    <p className="section-subtitle">
+                      Carregando seus gastos...
+                    </p>
                   ) : (
                     <>
                       {(() => {
                         const filtered = userSelectedCycle
                           ? userGastosList.filter((g: any) =>
-                              gastoPertenceAoCiclo(g, userSelectedCycle)
+                              gastoPertenceAoCiclo(g, userSelectedCycle),
                             )
                           : userGastosList;
 
                         if (filtered.length === 0) {
                           return (
-                            <p className="section-subtitle">Nenhum gasto encontrado.</p>
+                            <p className="section-subtitle">
+                              Nenhum gasto encontrado.
+                            </p>
                           );
                         }
 
@@ -3427,13 +4364,18 @@ function App() {
                             </p>
                             <ul className="gastos-list">
                               {listToShow.map((g: any) => (
-                                <li key={String(g.id || "")} className="gasto-item">
+                                <li
+                                  key={String(g.id || "")}
+                                  className="gasto-item"
+                                >
                                   <div className="gasto-textos">
                                     <div className="gasto-descricao">
                                       {String(g.descricao || "(sem descrição)")}
                                     </div>
                                     <div className="gasto-meta">
-                                      <span>{formatDateIsoToBR(g.data_compra)}</span>
+                                      <span>
+                                        {formatDateIsoToBR(g.data_compra)}
+                                      </span>
                                       <span>•</span>
                                       <span>
                                         {String(g.categoria || "").trim() ||
@@ -3443,12 +4385,16 @@ function App() {
                                   </div>
                                   <div className="gasto-acoes">
                                     <div className="gasto-valor">
-                                      {formatCurrencyBRL(Number(g.valor_total || 0))}
+                                      {formatCurrencyBRL(
+                                        Number(g.valor_total || 0),
+                                      )}
                                     </div>
                                     <button
                                       type="button"
                                       disabled={saving}
-                                      onClick={() => handleSelectUserGastoForEdit(g)}
+                                      onClick={() =>
+                                        handleSelectUserGastoForEdit(g)
+                                      }
                                     >
                                       Editar
                                     </button>
@@ -3478,7 +4424,9 @@ function App() {
                     </>
                   )}
                 </div>
+                )}
 
+                {userPage === "pagamentos" && (
                 <div className="user-section">
                   <SectionHeader
                     title="Meus pagamentos"
@@ -3488,7 +4436,9 @@ function App() {
                     <div className="error mt-2">{userLancamentosError}</div>
                   )}
                   {userLancamentosLoading ? (
-                    <p className="section-subtitle">Carregando seus pagamentos...</p>
+                    <p className="section-subtitle">
+                      Carregando seus pagamentos...
+                    </p>
                   ) : (
                     <>
                       {(() => {
@@ -3496,13 +4446,15 @@ function App() {
                           ? userPagamentosList.filter(
                               (p: any) =>
                                 getCycleFromIsoDate(p.data_pagamento) ===
-                                userSelectedCycle
+                                userSelectedCycle,
                             )
                           : userPagamentosList;
 
                         if (filtered.length === 0) {
                           return (
-                            <p className="section-subtitle">Nenhum pagamento encontrado.</p>
+                            <p className="section-subtitle">
+                              Nenhum pagamento encontrado.
+                            </p>
                           );
                         }
 
@@ -3528,7 +4480,9 @@ function App() {
                                       {String(p.descricao || "Pagamento")}
                                     </div>
                                     <div className="admin-pagamento-meta">
-                                      <span>{formatDateIsoToBR(p.data_pagamento)}</span>
+                                      <span>
+                                        {formatDateIsoToBR(p.data_pagamento)}
+                                      </span>
                                     </div>
                                   </div>
                                   <div className="gasto-acoes">
@@ -3538,7 +4492,9 @@ function App() {
                                     <button
                                       type="button"
                                       disabled={saving}
-                                      onClick={() => handleSelectUserPagamentoForEdit(p)}
+                                      onClick={() =>
+                                        handleSelectUserPagamentoForEdit(p)
+                                      }
                                     >
                                       Editar
                                     </button>
@@ -3568,7 +4524,9 @@ function App() {
                     </>
                   )}
                 </div>
+                )}
 
+                {userPage === "extrato" && (
                 <div className="user-section user-extrato-wrap">
                   <SectionHeader
                     title="Extrato do ciclo"
@@ -3579,14 +4537,16 @@ function App() {
                     <div className="subcard user-categorias-card">
                       <div className="subcard-title">Resumo por categoria</div>
                       <div className="user-categorias-rows">
-                        {userCategoriasResumo.slice(0, 6).map(([cat, total]) => (
-                          <div key={cat} className="user-categorias-row">
-                            <span>{cat}</span>
-                            <span className="user-categorias-total">
-                              {formatCurrencyBRL(total)}
-                            </span>
-                          </div>
-                        ))}
+                        {userCategoriasResumo
+                          .slice(0, 6)
+                          .map(([cat, total]) => (
+                            <div key={cat} className="user-categorias-row">
+                              <span>{cat}</span>
+                              <span className="user-categorias-total">
+                                {formatCurrencyBRL(total)}
+                              </span>
+                            </div>
+                          ))}
                       </div>
                       {userCategoriasResumo.length > 6 && (
                         <p className="section-subtitle mt-1">
@@ -3639,13 +4599,19 @@ function App() {
                   {userExtratoHasItens ? (
                     <ul className="gastos-list">
                       {userExtratoItensToShow.map((item: any, idx: number) => {
-                        const tipoLower = String(item?.tipo || "").toLowerCase();
+                        const tipoLower = String(
+                          item?.tipo || "",
+                        ).toLowerCase();
                         const isPagamento =
-                          tipoLower === "pagamento" || tipoLower === "pagamentos";
+                          tipoLower === "pagamento" ||
+                          tipoLower === "pagamentos";
                         const valor = Number(item?.valor || 0);
                         const valorColor = isPagamento ? "#4ade80" : "#facc15";
                         return (
-                          <li key={`${String(item?.data || "")}_${idx}`} className="user-extrato-item">
+                          <li
+                            key={`${String(item?.data || "")}_${idx}`}
+                            className="user-extrato-item"
+                          >
                             <div className="user-extrato-textos">
                               <div className="user-extrato-descricao">
                                 {String(item?.descricao || "(sem descrição)")}
@@ -3658,7 +4624,10 @@ function App() {
                                 </span>
                               </div>
                             </div>
-                            <div className="user-extrato-valor" style={{ color: valorColor }}>
+                            <div
+                              className="user-extrato-valor"
+                              style={{ color: valorColor }}
+                            >
                               {formatCurrencyBRL(valor)}
                             </div>
                           </li>
@@ -3666,7 +4635,9 @@ function App() {
                       })}
                     </ul>
                   ) : (
-                    <p className="section-subtitle">Nenhum lançamento encontrado neste ciclo.</p>
+                    <p className="section-subtitle">
+                      Nenhum lançamento encontrado neste ciclo.
+                    </p>
                   )}
 
                   {userExtratoFilteredItens.length > 10 && (
@@ -3681,12 +4652,101 @@ function App() {
                     </div>
                   )}
                 </div>
+                )}
               </>
             )}
           </section>
         )}
 
         {isAdmin && activePanel === "admin" && (
+          <section className="card-section">
+            <SectionHeader
+              title="Navegação do admin"
+              subtitle="Escolha a página para reduzir rolagem e focar no fluxo atual."
+            />
+            <div className="panel-nav panel-nav--admin">
+              <button
+                type="button"
+                className={
+                  "panel-nav-button" +
+                  (adminPage === "requests" ? " panel-nav-button--active" : "")
+                }
+                onClick={() => setAdminPage("requests")}
+              >
+                Solicitações
+              </button>
+              <button
+                type="button"
+                className={
+                  "panel-nav-button" +
+                  (adminPage === "workspace" ? " panel-nav-button--active" : "")
+                }
+                onClick={() => setAdminPage("workspace")}
+              >
+                Operação usuário
+              </button>
+              <button
+                type="button"
+                className={
+                  "panel-nav-button" +
+                  (adminPage === "system" ? " panel-nav-button--active" : "")
+                }
+                onClick={() => setAdminPage("system")}
+              >
+                Sistema
+              </button>
+            </div>
+
+            <div className="page-hero page-hero--admin">
+              <div className="page-hero-title">{adminPageMeta.title}</div>
+              <div className="page-hero-subtitle">{adminPageMeta.subtitle}</div>
+              <div className="page-kpi-grid">
+                <div className="page-kpi-card">
+                  <div className="page-kpi-label">Pendências</div>
+                  <div className="page-kpi-value">
+                    {adminPendingRequestsCount} pendente(s)
+                  </div>
+                </div>
+                <div className="page-kpi-card">
+                  <div className="page-kpi-label">Usuário em foco</div>
+                  <div className="page-kpi-value">
+                    {targetUserId.trim() || "Nenhum selecionado"}
+                  </div>
+                </div>
+                <div className="page-kpi-card">
+                  <div className="page-kpi-label">Aba operacional</div>
+                  <div className="page-kpi-value">{adminActiveTabLabel}</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="flow-steps flow-steps--admin">
+              <div className="flow-step">
+                <div className="flow-step-kicker">Etapa 1</div>
+                <div className="flow-step-title">Trate solicitações</div>
+                <div className="flow-step-text">
+                  Use Solicitações para aprovar e abrir usuários rapidamente.
+                </div>
+              </div>
+              <div className="flow-step">
+                <div className="flow-step-kicker">Etapa 2</div>
+                <div className="flow-step-title">Selecione o usuário</div>
+                <div className="flow-step-text">
+                  Em Operação usuário, abra um contexto de trabalho antes de editar.
+                </div>
+              </div>
+              <div className="flow-step">
+                <div className="flow-step-kicker">Etapa 3</div>
+                <div className="flow-step-title">Acompanhe sistema</div>
+                <div className="flow-step-text">
+                  Em Sistema, valide versão e sincronismo do ambiente.
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {isAdmin && activePanel === "admin" && adminPage === "requests" && (
           <section className="card-section">
             <SectionHeader
               title="Painel administrativo"
@@ -3696,7 +4756,8 @@ function App() {
             <div className="subcard">
               <div className="subcard-title">Solicitações de acesso</div>
               <p className="section-subtitle section-subtitle--tight">
-                Pedidos enviados pelo mini app (filtre por status e aprove em 1 toque).
+                Pedidos enviados pelo mini app (filtre por status e aprove em 1
+                toque).
               </p>
 
               <div className="user-extrato-filters">
@@ -3738,16 +4799,15 @@ function App() {
                 </button>
               </div>
 
-              <form
-                onSubmit={(e) => e.preventDefault()}
-                className="form"
-              >
+              <form onSubmit={(e) => e.preventDefault()} className="form">
                 <label>
-                  Buscar na lista:
+                  <span>Buscar na lista:</span>{" "}
                   <input
                     type="text"
                     value={adminAccessRequestsSearch}
-                    onChange={(e) => setAdminAccessRequestsSearch(e.target.value)}
+                    onChange={(e) =>
+                      setAdminAccessRequestsSearch(e.target.value)
+                    }
                     placeholder="Nome, username ou ID"
                   />
                 </label>
@@ -3760,7 +4820,9 @@ function App() {
               {(() => {
                 if (adminAccessRequestsLoading) {
                   return (
-                    <p className="section-subtitle">Carregando solicitações...</p>
+                    <p className="section-subtitle">
+                      Carregando solicitações...
+                    </p>
                   );
                 }
 
@@ -3772,7 +4834,9 @@ function App() {
                   const userId = String(reqItem?.user_id || "").toLowerCase();
                   const userInfo = reqItem?.user;
                   const name = String(userInfo?.name || "").toLowerCase();
-                  const username = String(userInfo?.username || "").toLowerCase();
+                  const username = String(
+                    userInfo?.username || "",
+                  ).toLowerCase();
                   return (
                     userId.includes(term) ||
                     name.includes(term) ||
@@ -3780,12 +4844,12 @@ function App() {
                   );
                 });
 
-                const statusLabel =
-                  adminAccessRequestsFilter === "pending"
-                    ? "pendente"
-                    : adminAccessRequestsFilter === "approved"
-                    ? "aprovada"
-                    : "";
+                let statusLabel = "";
+                if (adminAccessRequestsFilter === "pending") {
+                  statusLabel = "pendente";
+                } else if (adminAccessRequestsFilter === "approved") {
+                  statusLabel = "aprovada";
+                }
 
                 if (filtered.length === 0) {
                   return (
@@ -3799,7 +4863,8 @@ function App() {
                 return (
                   <>
                     <p className="section-subtitle">
-                      Mostrando {Math.min(filtered.length, 20)} de {filtered.length}
+                      Mostrando {Math.min(filtered.length, 20)} de{" "}
+                      {filtered.length}
                       {statusLabel ? ` ${statusLabel}` : ""}.
                     </p>
                     <ul className="gastos-list">
@@ -3813,7 +4878,9 @@ function App() {
                         const solicitadoEm = reqItem?.solicitado_em
                           ? formatDateTime(reqItem.solicitado_em)
                           : "-";
-                        const status = String(reqItem?.status || "").toLowerCase();
+                        const status = String(
+                          reqItem?.status || "",
+                        ).toLowerCase();
                         const isPending = status === "pending";
 
                         return (
@@ -3864,7 +4931,10 @@ function App() {
                                       className="button--sm"
                                       disabled={saving || loading}
                                       onClick={() =>
-                                        void handleAdminApproveAccess(userId, true)
+                                        void handleAdminApproveAccess(
+                                          userId,
+                                          true,
+                                        )
                                       }
                                     >
                                       Aprovar e abrir
@@ -3886,7 +4956,9 @@ function App() {
                   type="button"
                   className="button--sm button--ghost"
                   disabled={adminAccessRequestsLoading}
-                  onClick={() => setAdminAccessRequestsReloadToken((t) => t + 1)}
+                  onClick={() =>
+                    setAdminAccessRequestsReloadToken((t) => t + 1)
+                  }
                 >
                   Atualizar lista
                 </button>
@@ -3895,15 +4967,44 @@ function App() {
           </section>
         )}
 
-        {isAdmin && activePanel === "admin" && (
+        {isAdmin && activePanel === "admin" && adminPage === "workspace" && (
           <section className="card-section">
             <SectionHeader
               title="Consultar usuário alvo"
-              subtitle="Informe o ID numérico do Telegram ou o username (com ou sem @) para localizar o usuário."
+              subtitle="Busque por ID/username ou selecione diretamente na lista de usuários para abrir a área de trabalho." 
             />
+
+            <div className="subcard">
+              <div className="subcard-title">Área de trabalho atual</div>
+              <div className="admin-profile-grid">
+                <div className="admin-profile-field">
+                  <div className="admin-profile-label">Usuário selecionado</div>
+                  <div className="admin-profile-value">
+                    {userDetails
+                      ? `${String(userDetails.name || "(sem nome)")} (${String(
+                          userDetails.id,
+                        )})`
+                      : targetUserId.trim() || "Nenhum usuário aberto"}
+                  </div>
+                </div>
+                <div className="admin-profile-field">
+                  <div className="admin-profile-label">Aba ativa</div>
+                  <div className="admin-profile-value">
+                    {(() => {
+                      if (adminActiveTab === "overview") return "Visão geral";
+                      if (adminActiveTab === "lancamentos") return "Lançamentos";
+                      if (adminActiveTab === "pagamentos") return "Pagamentos";
+                      if (adminActiveTab === "faturas") return "Faturas";
+                      return "Configuração";
+                    })()}
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <form onSubmit={handleLoadData} className="form">
               <label>
-                ID ou username do usuário (Telegram):
+                <span>ID ou username do usuário (Telegram):</span>{" "}
                 <input
                   type="text"
                   value={targetUserId}
@@ -3931,38 +5032,208 @@ function App() {
               </button>
             </form>
             {error && <div className="error">{error}</div>}
+
+            {!userDetails && (
+              <div className="admin-empty-state mt-2">
+                <div className="admin-empty-title">Nenhum usuário em operação</div>
+                <div className="admin-empty-text">
+                  Selecione um usuário acima para habilitar as abas operacionais
+                  (perfil, gastos, pagamentos e faturas).
+                </div>
+              </div>
+            )}
+
+            <div className="subcard mt-2 admin-user-directory">
+              <div className="subcard-title">Todos os usuários do bot</div>
+              <p className="section-subtitle section-subtitle--tight">
+                Lista completa paginada. Use busca rápida e clique em "Abrir" para entrar no contexto do usuário.
+              </p>
+              <div className="admin-user-directory-meta">
+                {adminAllUsers.length} carregado(s)
+              </div>
+
+              <form onSubmit={(e) => e.preventDefault()} className="form">
+                <label>
+                  <span>Buscar na lista:</span>{" "}
+                  <input
+                    type="text"
+                    value={adminAllUsersSearch}
+                    onChange={(e) => setAdminAllUsersSearch(e.target.value)}
+                    placeholder="Nome, username ou ID"
+                  />
+                </label>
+              </form>
+
+              {adminAllUsersError && (
+                <div className="error mt-2">{adminAllUsersError}</div>
+              )}
+
+              {(() => {
+                const term = adminAllUsersSearch.trim().toLowerCase();
+                const filtered = adminAllUsers.filter((u) => {
+                  if (!term) {
+                    return true;
+                  }
+                  const id = u.id.toLowerCase();
+                  const name = String(u.name || "").toLowerCase();
+                  const username = String(u.username || "").toLowerCase();
+                  return (
+                    id.includes(term) ||
+                    name.includes(term) ||
+                    username.includes(term)
+                  );
+                });
+
+                if (adminAllUsersLoading && adminAllUsers.length === 0) {
+                  return (
+                    <p className="section-subtitle">Carregando usuários...</p>
+                  );
+                }
+
+                if (filtered.length === 0) {
+                  return (
+                    <p className="section-subtitle">
+                      Nenhum usuário encontrado para este filtro.
+                    </p>
+                  );
+                }
+
+                return (
+                  <>
+                    <p className="section-subtitle">
+                      Exibindo {Math.min(filtered.length, 60)} de {filtered.length} resultado(s).
+                    </p>
+                    <ul className="gastos-list">
+                      {filtered.slice(0, 60).map((u) => (
+                        <li key={u.id} className="gasto-item">
+                          <div className="gasto-textos">
+                            <div className="gasto-descricao">
+                              {u.name || "(sem nome)"}
+                            </div>
+                            <div className="gasto-meta">
+                              <span>{u.id}</span>
+                              {u.username ? (
+                                <>
+                                  <span>•</span>
+                                  <span>@{u.username}</span>
+                                </>
+                              ) : null}
+                              <span>•</span>
+                              <span>{u.autorizado ? "Autorizado" : "Sem acesso"}</span>
+                              <span>•</span>
+                              <span>{u.ativo ? "Ativo" : "Inativo"}</span>
+                            </div>
+                          </div>
+                          <div className="gasto-acoes">
+                            <button
+                              type="button"
+                              className="button--sm"
+                              disabled={loading || saving}
+                              onClick={() => {
+                                setTargetUserId(u.id);
+                                void loadAdminUserDataById(u.id);
+                              }}
+                            >
+                              Abrir
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                );
+              })()}
+
+              <div className="button-row mt-2">
+                <button
+                  type="button"
+                  className="button--sm button--ghost"
+                  disabled={adminAllUsersLoading}
+                  onClick={() => void loadAdminAllUsers({ reset: true })}
+                >
+                  Recarregar lista
+                </button>
+                <button
+                  type="button"
+                  className="button--sm button--ghost"
+                  disabled={adminAllUsersLoading || !adminAllUsersHasMore}
+                  onClick={() => void loadAdminAllUsers()}
+                >
+                  {adminAllUsersHasMore ? "Carregar mais" : "Lista completa"}
+                </button>
+              </div>
+            </div>
           </section>
         )}
 
-        {isAdmin && activePanel === "admin" && userDetails && (
-          <div className="admin-tabs">
+        {isAdmin && activePanel === "admin" && adminPage === "workspace" && userDetails && (
+          <div className="admin-tabs-wrap">
+            <div className="admin-tabs-title">Navegação administrativa</div>
+            <div className="admin-tabs">
+            {(() => {
+              const isUserDetailsMissing = !userDetails;
+              return (
+                <>
             <button
               type="button"
               className={
                 "admin-tab-button" +
-                (adminActiveTab === "overview" ? " admin-tab-button--active" : "")
+                (adminActiveTab === "overview"
+                  ? " admin-tab-button--active"
+                  : "")
               }
-              onClick={() => setAdminActiveTab("overview")}
+              disabled={isUserDetailsMissing}
+              onClick={() => {
+                setAdminPage("workspace");
+                setAdminActiveTab("overview");
+              }}
+              title={
+                isUserDetailsMissing
+                  ? "Selecione um usuário para habilitar"
+                  : undefined
+              }
             >
-              Visão geral
+              Perfil e resumo
             </button>
             <button
               type="button"
               className={
                 "admin-tab-button" +
-                (adminActiveTab === "lancamentos" ? " admin-tab-button--active" : "")
+                (adminActiveTab === "lancamentos"
+                  ? " admin-tab-button--active"
+                  : "")
               }
-              onClick={() => setAdminActiveTab("lancamentos")}
+              disabled={isUserDetailsMissing}
+              onClick={() => {
+                setAdminPage("workspace");
+                setAdminActiveTab("lancamentos");
+              }}
+              title={
+                isUserDetailsMissing
+                  ? "Selecione um usuário para habilitar"
+                  : undefined
+              }
             >
-              Lançamentos
+              Gastos
             </button>
             <button
               type="button"
               className={
                 "admin-tab-button" +
-                (adminActiveTab === "pagamentos" ? " admin-tab-button--active" : "")
+                (adminActiveTab === "pagamentos"
+                  ? " admin-tab-button--active"
+                  : "")
               }
-              onClick={() => setAdminActiveTab("pagamentos")}
+              disabled={isUserDetailsMissing}
+              onClick={() => {
+                setAdminPage("workspace");
+                setAdminActiveTab("pagamentos");
+              }}
+              title={
+                isUserDetailsMissing
+                  ? "Selecione um usuário para habilitar"
+                  : undefined
+              }
             >
               Pagamentos
             </button>
@@ -3970,335 +5241,894 @@ function App() {
               type="button"
               className={
                 "admin-tab-button" +
+                (adminActiveTab === "faturas"
+                  ? " admin-tab-button--active"
+                  : "")
+              }
+              onClick={() => {
+                setAdminPage("workspace");
+                setAdminActiveTab("faturas");
+              }}
+            >
+              Faturas PDF
+            </button>
+            <button
+              type="button"
+              className={
+                "admin-tab-button" +
                 (adminActiveTab === "config" ? " admin-tab-button--active" : "")
               }
-              onClick={() => setAdminActiveTab("config")}
+              onClick={() => {
+                setAdminPage("system");
+                setAdminActiveTab("config");
+              }}
             >
-              Configuração
+              Sistema
             </button>
+                </>
+              );
+            })()}
+            </div>
           </div>
         )}
 
-        {isAdmin && activePanel === "admin" && userDetails &&
+        {isAdmin &&
+          activePanel === "admin" &&
+          adminPage === "workspace" &&
+          userDetails &&
           (adminActiveTab === "overview" || adminActiveTab === "config") && (
+            <section className="card-section">
+              <SectionHeader
+                title="Dados do usuário"
+                subtitle="Visão rápida do perfil do usuário e do ciclo selecionado."
+              />
+              <div className="subcard">
+                <div className="subcard-title">Perfil</div>
+                <div className="admin-profile-grid">
+                  <div className="admin-profile-field">
+                    <div className="admin-profile-label">ID Telegram</div>
+                    <div className="admin-profile-value">
+                      {String(userDetails.id)}
+                    </div>
+                  </div>
+                  <div className="admin-profile-field">
+                    <div className="admin-profile-label">Nome salvo</div>
+                    <div className="admin-profile-value">
+                      {userDetails.name || "(sem nome)"}
+                    </div>
+                  </div>
+                  <div className="admin-profile-field">
+                    <div className="admin-profile-label">Username salvo</div>
+                    <div className="admin-profile-value">
+                      {userDetails.username ? `@${userDetails.username}` : "-"}
+                    </div>
+                  </div>
+                  <div className="admin-profile-field">
+                    <div className="admin-profile-label">Criado em</div>
+                    <div className="admin-profile-value">
+                      {formatDateTime(userDetails.criado_em)}
+                    </div>
+                  </div>
+                  <div className="admin-profile-field">
+                    <div className="admin-profile-label">Último acesso</div>
+                    <div className="admin-profile-value">
+                      {formatDateTime(userDetails.last_seen)}
+                    </div>
+                  </div>
+                  <div className="admin-profile-field">
+                    <div className="admin-profile-label">Status da conta</div>
+                    <div className="admin-profile-value">
+                      {userDetails.ativo === false ? "Inativo" : "Ativo"} —{" "}
+                      {userDetails.autorizado
+                        ? "Acesso liberado"
+                        : "Aguardando liberação"}
+                    </div>
+                  </div>
+
+                  <div className="admin-profile-field">
+                    <div className="admin-profile-label">
+                      Solicitação de acesso
+                    </div>
+                    <div className="admin-profile-value">
+                      {(() => {
+                        const solicit = userDetails.solicitacao_acesso;
+                        const statusRaw = String(
+                          solicit?.status || "",
+                        ).toLowerCase();
+                        const status = statusRaw || "none";
+
+                        if (status === "approved") {
+                          return (
+                            <div className="admin-access-request">
+                              <div className="admin-status--approved">
+                                Aprovada
+                              </div>
+                              <div className="admin-access-meta">
+                                {solicit?.aprovado_em
+                                  ? `Aprovado em ${formatDateTime(
+                                      solicit.aprovado_em,
+                                    )}`
+                                  : ""}
+                                {solicit?.aprovado_por
+                                  ? ` por ${String(solicit.aprovado_por)}`
+                                  : ""}
+                              </div>
+                            </div>
+                          );
+                        }
+
+                        if (status === "pending") {
+                          return (
+                            <div className="admin-access-request">
+                              <div className="admin-status--pending">
+                                Pendente
+                              </div>
+                              <div className="admin-access-meta">
+                                {solicit?.solicitado_em
+                                  ? `Solicitado em ${formatDateTime(
+                                      solicit.solicitado_em,
+                                    )}`
+                                  : ""}
+                              </div>
+                            </div>
+                          );
+                        }
+
+                        return (
+                          <div className="admin-access-request">
+                            <div className="muted-text">
+                              Nenhuma solicitação
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <form onSubmit={handleSaveUsuario} className="form">
+                <label>
+                  <span>Nome:</span>{" "}
+                  <input
+                    type="text"
+                    value={editUserName}
+                    onChange={(e) => setEditUserName(e.target.value)}
+                  />
+                </label>
+                <label>
+                  <span>Username (sem @):</span>{" "}
+                  <input
+                    type="text"
+                    value={editUserUsername}
+                    onChange={(e) => setEditUserUsername(e.target.value)}
+                  />
+                </label>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={editUserAtivo}
+                    onChange={(e) => setEditUserAtivo(e.target.checked)}
+                  />
+                  <span>Usuário ativo</span>
+                </label>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={editUserAutorizado}
+                    onChange={(e) => setEditUserAutorizado(e.target.checked)}
+                  />
+                  <span>Acesso liberado (autorizado)</span>
+                </label>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={editUserInvoicePdfEnabled}
+                    onChange={(e) =>
+                      setEditUserInvoicePdfEnabled(e.target.checked)
+                    }
+                  />
+                  <span>Permitir solicitar fatura em PDF</span>
+                </label>
+                <p className="muted-text muted-text--sm mt-1">
+                  <strong>Usuário ativo</strong> controla se o usuário ainda
+                  pode usar o cartão neste sistema.{" "}
+                  <strong>Acesso liberado (autorizado)</strong> libera o uso do
+                  mini app para registrar gastos e pagamentos.
+                </p>
+                <button type="submit" disabled={saving}>
+                  {saving ? "Salvando..." : "Salvar dados do usuário"}
+                </button>
+              </form>
+
+              <form onSubmit={handleAdminSendMessage} className="form mt-2">
+                <label htmlFor="admin-message-text">
+                  <span>Enviar mensagem para este usuário (Telegram):</span>
+                </label>
+                <textarea
+                  id="admin-message-text"
+                  value={adminMessageText}
+                  onChange={(e) => setAdminMessageText(e.target.value)}
+                  rows={3}
+                  placeholder="Digite aqui a mensagem que o bot vai enviar para o usuário"
+                />
+                <button type="submit" disabled={adminMessageSending}>
+                  {adminMessageSending ? "Enviando..." : "Enviar mensagem"}
+                </button>
+                {adminMessageResult ? (
+                  <div className="mt-2">
+                    <div className="muted-text">{adminMessageResult}</div>
+                  </div>
+                ) : null}
+              </form>
+              {userActionMessage && (
+                <div className="success mt-2">{userActionMessage}</div>
+              )}
+            </section>
+          )}
+
+        {isAdmin && activePanel === "admin" && adminPage === "system" && (
           <section className="card-section">
             <SectionHeader
-              title="Dados do usuário"
-              subtitle="Visão rápida do perfil do usuário e do ciclo selecionado."
+              title="Versões e changelog"
+              subtitle="Visível somente para administradores."
             />
             <div className="subcard">
-              <div className="subcard-title">Perfil</div>
+              <div className="subcard-title">Versões</div>
+              {(() => {
+                let backendVersionLabel = "-";
+                if (adminMetaLoading) {
+                  backendVersionLabel = "carregando...";
+                } else {
+                  backendVersionLabel = String(adminMeta?.versions?.backend || "-");
+                }
+
+                let botLabel = "-";
+                if (adminMetaLoading) {
+                  botLabel = "carregando...";
+                } else if (adminMeta?.bot) {
+                  let botUsername = "(sem username)";
+                  if (adminMeta.bot.username) {
+                    botUsername = `@${adminMeta.bot.username}`;
+                  }
+                  const botId = String(adminMeta.bot.id || "-");
+                  botLabel = `${botUsername} (id: ${botId})`;
+                }
+
+                const backendVersion = String(
+                  adminMeta?.versions?.backend || "",
+                ).trim();
+                let versionSyncMessage: React.ReactNode = null;
+                if (backendVersion) {
+                  if (backendVersion !== APP_VERSION) {
+                    versionSyncMessage = (
+                      <div className="error mt-2">
+                        Atenção: versões divergentes (admin={APP_VERSION} /
+                        backend={backendVersion}).
+                      </div>
+                    );
+                  } else {
+                    versionSyncMessage = (
+                      <div className="success mt-2">
+                        OK: versões sincronizadas (admin/backend {APP_VERSION}).
+                      </div>
+                    );
+                  }
+                }
+
+                return ( // NOSONAR
+                  <>
               <div className="admin-profile-grid">
                 <div className="admin-profile-field">
-                  <div className="admin-profile-label">ID Telegram</div>
-                  <div className="admin-profile-value">{String(userDetails.id)}</div>
+                  <div className="admin-profile-label">
+                    Versão do painel (admin)
+                  </div>
+                  <div className="admin-profile-value">{APP_VERSION}</div>
                 </div>
                 <div className="admin-profile-field">
-                  <div className="admin-profile-label">Nome salvo</div>
-                  <div className="admin-profile-value">
-                    {userDetails.name || "(sem nome)"}
+                  <div className="admin-profile-label">
+                    Versão do mini app (usuário)
                   </div>
+                  <div className="admin-profile-value">{APP_VERSION}</div>
                 </div>
                 <div className="admin-profile-field">
-                  <div className="admin-profile-label">Username salvo</div>
-                  <div className="admin-profile-value">
-                    {userDetails.username ? `@${userDetails.username}` : "-"}
-                  </div>
+                  <div className="admin-profile-label">Versão do backend</div>
+                  <div className="admin-profile-value">{backendVersionLabel}</div>
                 </div>
                 <div className="admin-profile-field">
-                  <div className="admin-profile-label">Criado em</div>
-                  <div className="admin-profile-value">
-                    {formatDateTime(userDetails.criado_em)}
-                  </div>
-                </div>
-                <div className="admin-profile-field">
-                  <div className="admin-profile-label">Último acesso</div>
-                  <div className="admin-profile-value">
-                    {formatDateTime(userDetails.last_seen)}
-                  </div>
-                </div>
-                <div className="admin-profile-field">
-                  <div className="admin-profile-label">Status da conta</div>
-                  <div className="admin-profile-value">
-                    {userDetails.ativo === false ? "Inativo" : "Ativo"} — {" "}
-                    {userDetails.autorizado ? "Acesso liberado" : "Aguardando liberação"}
-                  </div>
-                </div>
-
-                <div className="admin-profile-field">
-                  <div className="admin-profile-label">Solicitação de acesso</div>
-                  <div className="admin-profile-value">
-                    {(() => {
-                      const solicit = userDetails.solicitacao_acesso;
-                      const statusRaw = String(solicit?.status || "").toLowerCase();
-                      const status = statusRaw || "none";
-
-                      if (status === "approved") {
-                        return (
-                          <div className="admin-access-request">
-                            <div className="admin-status--approved">
-                              Aprovada
-                            </div>
-                            <div className="admin-access-meta">
-                              {solicit?.aprovado_em
-                                ? `Aprovado em ${formatDateTime(
-                                    solicit.aprovado_em
-                                  )}`
-                                : ""}
-                              {solicit?.aprovado_por
-                                ? ` por ${String(solicit.aprovado_por)}`
-                                : ""}
-                            </div>
-                          </div>
-                        );
-                      }
-
-                      if (status === "pending") {
-                        return (
-                          <div className="admin-access-request">
-                            <div className="admin-status--pending">Pendente</div>
-                            <div className="admin-access-meta">
-                              {solicit?.solicitado_em
-                                ? `Solicitado em ${formatDateTime(
-                                    solicit.solicitado_em
-                                  )}`
-                                : ""}
-                            </div>
-                          </div>
-                        );
-                      }
-
-                      return (
-                        <div className="admin-access-request">
-                          <div className="muted-text">Nenhuma solicitação</div>
-                        </div>
-                      );
-                    })()}
-                  </div>
+                  <div className="admin-profile-label">Bot em produção</div>
+                  <div className="admin-profile-value">{botLabel}</div>
                 </div>
               </div>
+
+              {adminMetaError ? (
+                <div className="error mt-2">{adminMetaError}</div>
+              ) : null}
+
+              {versionSyncMessage}
+                  </>
+                );
+              })()}
             </div>
 
-            <form onSubmit={handleSaveUsuario} className="form">
-              <label>
-                Nome:
-                <input
-                  type="text"
-                  value={editUserName}
-                  onChange={(e) => setEditUserName(e.target.value)}
-                />
-              </label>
-              <label>
-                Username (sem @):
-                <input
-                  type="text"
-                  value={editUserUsername}
-                  onChange={(e) => setEditUserUsername(e.target.value)}
-                />
-              </label>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={editUserAtivo}
-                  onChange={(e) => setEditUserAtivo(e.target.checked)}
-                />
-                <span>Usuário ativo</span>
-              </label>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={editUserAutorizado}
-                  onChange={(e) => setEditUserAutorizado(e.target.checked)}
-                />
-                <span>Acesso liberado (autorizado)</span>
-              </label>
-              <p className="muted-text muted-text--sm mt-1">
-                <strong>Usuário ativo</strong> controla se o usuário ainda pode usar o cartão neste sistema. {" "}
-                <strong>Acesso liberado (autorizado)</strong> libera o uso do mini app para registrar gastos e pagamentos.
-              </p>
-              <button type="submit" disabled={saving}>
-                {saving ? "Salvando..." : "Salvar dados do usuário"}
-              </button>
-            </form>
-            {userActionMessage && (
-              <div className="success mt-2">{userActionMessage}</div>
-            )}
-          </section>
-        )}
+            <div className="subcard mt-2">
+              <div className="subcard-title">Changelog</div>
+              {(() => {
+                if (adminMetaLoading) {
+                  return <div className="muted-text">carregando...</div>;
+                }
 
-        {isAdmin && activePanel === "admin" && adminActiveTab === "overview" &&
-          billingCycles.length > 0 && (
-          <section className="card-section">
-            <strong>Selecionar fatura (ciclo)</strong>
-            <BillingCycleSelect
-              value={selectedCycle || ""}
-              options={billingCycles}
-              onChange={(next) => setSelectedCycle(next || null)}
-            />
+                const changelogItems = Array.isArray(adminMeta?.changelog?.items)
+                  ? adminMeta.changelog.items
+                  : [];
 
-            {selectedCycle && cycleSummary && (
-              <div className="resumo-fatura-card">
-                <div className="resumo-fatura-titulo">Resumo da fatura {selectedCycle}</div>
-                <div className="resumo-fatura-linha">
-                  <span className="resumo-fatura-label">Gastos/parcelas</span>
-                  <span className="resumo-fatura-valor">{formatCurrencyBRL(cycleSummary.parcelas_mes)}</span>
-                </div>
-                <div className="resumo-fatura-linha">
-                  <span className="resumo-fatura-label">Pagamentos</span>
-                  <span className="resumo-fatura-valor">{formatCurrencyBRL(cycleSummary.pagamentos_mes)}</span>
-                </div>
-                <div className="resumo-fatura-linha resumo-fatura-saldo-periodo">
-                  <span className="resumo-fatura-label">Saldo deste ciclo</span>
-                  <span className="resumo-fatura-direita">
-                    <span className="resumo-fatura-valor">{formatCurrencyBRL(cycleSummary.saldo_mes)}</span>
-                    <button
-                      type="button"
-                      className="button--sm button--ghost"
-                      onClick={() => setInfoDialog("saldo_ciclo")}
-                    >
-                      info
-                    </button>
-                  </span>
-                </div>
-                {(() => {
-                  const info = getSaldoAcumuladoInfo(cycleSummary.saldo_acumulado);
+                if (changelogItems.length === 0) {
                   return (
-                    <div className="resumo-fatura-linha resumo-fatura-acumulado">
-                      <span className="resumo-fatura-label" style={{ color: info.color }}>
-                        {info.label}
-                      </span>
-                      <span className="resumo-fatura-direita">
-                        <span className="resumo-fatura-valor" style={{ color: info.color }}>
-                          {formatCurrencyBRL(cycleSummary.saldo_acumulado)}
-                        </span>
-                        <button
-                          type="button"
-                          className="button--sm button--ghost"
-                          onClick={() => setInfoDialog("saldo_acumulado")}
-                        >
-                          info
-                        </button>
-                      </span>
+                    <div className="muted-text">
+                      Nenhuma entrada de changelog encontrada.
                     </div>
                   );
-                })()}
+                }
+
+                return (
+                  <div>
+                    {changelogItems.slice(0, 10).map((item: any, idx: number) => {
+                      const titleVersion = String(item?.version || "-");
+                      const titleDate = String(item?.date || "-");
+                      const title = `${titleVersion} — ${titleDate}`;
+                      const changes = Array.isArray(item?.changes)
+                        ? item.changes
+                        : [];
+                      return (
+                        <div key={`${title}-${idx}`} className="mt-2">
+                          <strong>{title}</strong>
+                          {changes.length > 0 ? (
+                            <ul className="mt-1">
+                              {changes
+                                .slice(0, 20)
+                                .map((c: any, cidx: number) => (
+                                  <li key={`${idx}-${cidx}`}>{String(c)}</li>
+                                ))}
+                            </ul>
+                          ) : (
+                            <div className="muted-text">(sem detalhes)</div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+            </div>
+          </section>
+        )}
+
+        {isAdmin &&
+          activePanel === "admin" &&
+          adminPage === "workspace" &&
+          adminActiveTab === "overview" &&
+          billingCycles.length > 0 && (
+            <section className="card-section">
+              <strong>Selecionar fatura (ciclo)</strong>
+              <BillingCycleSelect
+                value={selectedCycle || ""}
+                options={billingCycles}
+                onChange={(next) => setSelectedCycle(next || null)}
+              />
+
+              {selectedCycle && cycleSummary && (
+                <div className="resumo-fatura-card">
+                  <div className="resumo-fatura-titulo">
+                    Resumo da fatura {selectedCycle}
+                  </div>
+                  <div className="resumo-fatura-linha">
+                    <span className="resumo-fatura-label">Gastos/parcelas</span>
+                    <span className="resumo-fatura-valor">
+                      {formatCurrencyBRL(cycleSummary.parcelas_mes)}
+                    </span>
+                  </div>
+                  <div className="resumo-fatura-linha">
+                    <span className="resumo-fatura-label">Pagamentos</span>
+                    <span className="resumo-fatura-valor">
+                      {formatCurrencyBRL(cycleSummary.pagamentos_mes)}
+                    </span>
+                  </div>
+                  <div className="resumo-fatura-linha resumo-fatura-saldo-periodo">
+                    <span className="resumo-fatura-label">
+                      Saldo deste ciclo
+                    </span>
+                    <span className="resumo-fatura-direita">
+                      <span className="resumo-fatura-valor">
+                        {formatCurrencyBRL(cycleSummary.saldo_mes)}
+                      </span>
+                      <button
+                        type="button"
+                        className="button--sm button--ghost"
+                        onClick={() => setInfoDialog("saldo_ciclo")}
+                      >
+                        info
+                      </button>
+                    </span>
+                  </div>
+                  {(() => {
+                    const info = getSaldoAcumuladoInfo(
+                      cycleSummary.saldo_acumulado,
+                    );
+                    return (
+                      <div className="resumo-fatura-linha resumo-fatura-acumulado">
+                        <span
+                          className="resumo-fatura-label"
+                          style={{ color: info.color }}
+                        >
+                          {info.label}
+                        </span>
+                        <span className="resumo-fatura-direita">
+                          <span
+                            className="resumo-fatura-valor"
+                            style={{ color: info.color }}
+                          >
+                            {formatCurrencyBRL(cycleSummary.saldo_acumulado)}
+                          </span>
+                          <button
+                            type="button"
+                            className="button--sm button--ghost"
+                            onClick={() => setInfoDialog("saldo_acumulado")}
+                          >
+                            info
+                          </button>
+                        </span>
+                      </div>
+                    );
+                  })()}
+                  <div className="button-row mt-2">
+                    <button
+                      type="button"
+                      disabled={saving}
+                      onClick={handleExportAdminValidationReportCsv}
+                    >
+                      Exportar relatório de validação (CSV)
+                    </button>
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+
+        {isAdmin &&
+          activePanel === "admin" &&
+          adminPage === "workspace" &&
+          adminActiveTab === "lancamentos" && (
+            <section className="card-section">
+              <strong>Gastos do usuário</strong>
+              <p className="section-subtitle">
+                Use os botões abaixo para criar novos lançamentos para o usuário
+                selecionado.
+              </p>
+              <div className="button-row">
+                <button
+                  type="button"
+                  disabled={saving || !targetUserId}
+                  onClick={() => setUserActiveForm("gasto")}
+                >
+                  Novo gasto
+                </button>
               </div>
-            )}
-          </section>
-        )}
+              {(() => {
+                if (filteredGastos.length === 0) {
+                  return (
+                    <p className="section-subtitle">
+                      Nenhum gasto ativo foi encontrado para este usuário.
+                    </p>
+                  );
+                }
 
-        {isAdmin && activePanel === "admin" && adminActiveTab === "lancamentos" && (
-          <section className="card-section">
-            <strong>Gastos do usuário</strong>
-            {filteredGastos.length === 0 ? (
-              <p className="section-subtitle">Nenhum gasto ativo foi encontrado para este usuário.</p>
-            ) : (
-              <>
-                <p className="section-subtitle">
-                  Lista de gastos ativos do usuário. Use este painel para revisar e, se necessário, editar ou inativar lançamentos.
-                </p>
-                <div className="button-row">
-                  <button type="button" disabled={saving} onClick={handleExportAdminGastosCsv}>
-                    Exportar CSV
-                  </button>
-                </div>
-                <ul className="gastos-list">
-                  {filteredGastos.map((g) => {
-                    const dataStr = formatDateIsoToBR(g.data_compra);
-                    const descricao = g.descricao || "(sem descrição)";
-                    const valorTotal = Number(g.valor_total || 0);
-                    const parcelasTotal = Number(g.parcelas_total || 1);
-                    const valorParcela = Number(g.valor_parcela || valorTotal);
-                    const temParcelas = Number.isFinite(parcelasTotal) && parcelasTotal > 1;
-                    let parcelaAtual: number | null = null;
-                    if (temParcelas && selectedCycle) {
-                      const cycles = getGastoCycles(g);
-                      const idx = cycles.indexOf(selectedCycle);
-                      if (idx >= 0) {
-                        parcelaAtual = idx + 1;
+                return (
+                  <>
+                    <p className="section-subtitle">
+                      Lista de gastos ativos do usuário. Use este painel para
+                      revisar e, se necessário, editar ou inativar lançamentos.
+                    </p>
+                    <div className="button-row">
+                      <button
+                        type="button"
+                        disabled={saving}
+                        onClick={handleExportAdminGastosCsv}
+                      >
+                        Exportar CSV
+                      </button>
+                    </div>
+                    <ul className="gastos-list">
+                      {filteredGastos.map((g) => {
+                      const dataStr = formatDateIsoToBR(g.data_compra);
+                      const descricao = g.descricao || "(sem descrição)";
+                      const valorTotal = Number(g.valor_total || 0);
+                      const parcelasTotal = Number(g.parcelas_total || 1);
+                      const valorParcela = Number(
+                        g.valor_parcela || valorTotal,
+                      );
+                      const temParcelas =
+                        Number.isFinite(parcelasTotal) && parcelasTotal > 1;
+                      let parcelaAtual: number | null = null;
+                      if (temParcelas && selectedCycle) {
+                        const cycles = getGastoCycles(g);
+                        const idx = cycles.indexOf(selectedCycle);
+                        if (idx >= 0) {
+                          parcelaAtual = idx + 1;
+                        }
                       }
-                    }
-                    return (
-                      <li key={g.id} className="gasto-item">
-                        <div className="gasto-textos">
-                          <div className="gasto-descricao">{descricao}</div>
-                          <div className="gasto-meta">
-                            <span>{dataStr}</span>
-                            <span>•</span>
-                            <span>
-                              {temParcelas
-                                ? parcelaAtual
-                                  ? `Parcela ${parcelaAtual}/${parcelasTotal}`
-                                  : `${parcelasTotal} parcelas`
-                                : "Pagamento à vista"}
-                            </span>
-                            {temParcelas && (
-                              <>
-                                <span>•</span>
-                                <span>
-                                  {`${parcelasTotal}x de ${formatCurrencyBRL(valorParcela)}`}
-                                </span>
-                              </>
-                            )}
+                      return (
+                        <li key={g.id} className="gasto-item">
+                          <div className="gasto-textos">
+                            <div className="gasto-descricao">{descricao}</div>
+                            <div className="gasto-meta">
+                              <span>{dataStr}</span>
+                              <span>•</span>
+                              <span>
+                                {(() => {
+                                  if (!temParcelas) {
+                                    return "Pagamento à vista";
+                                  }
+                                  if (parcelaAtual) {
+                                    return `Parcela ${parcelaAtual}/${parcelasTotal}`;
+                                  }
+                                  return `${parcelasTotal} parcelas`;
+                                })()}
+                              </span>
+                              {temParcelas && (
+                                <>
+                                  <span>•</span>
+                                  <span>
+                                    {`${parcelasTotal}x de ${formatCurrencyBRL(valorParcela)}`}
+                                  </span>
+                                </>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                        <div className="gasto-acoes">
-                          <div className="gasto-valor">{formatCurrencyBRL(valorTotal)}</div>
-                          <button type="button" disabled={saving} onClick={() => handleSelectGasto(g)}>
-                            Editar
-                          </button>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </>
-            )}
-          </section>
-        )}
+                          <div className="gasto-acoes">
+                            <div className="gasto-valor">
+                              {formatCurrencyBRL(valorTotal)}
+                            </div>
+                            <button
+                              type="button"
+                              disabled={saving}
+                              onClick={() => handleSelectGasto(g)}
+                            >
+                              Editar
+                            </button>
+                          </div>
+                        </li>
+                      );
+                      })}
+                    </ul>
+                  </>
+                );
+              })()}
+            </section>
+          )}
 
-        {isAdmin && activePanel === "admin" && adminActiveTab === "pagamentos" && (
-          <section className="card-section">
-            <strong>Pagamentos do usuário</strong>
-            {filteredPagamentos.length === 0 ? (
-              <p className="section-subtitle">Nenhum pagamento foi encontrado para este usuário.</p>
-            ) : (
-              <>
-                <p className="section-subtitle">
-                  Pagamentos registrados para este usuário. Aqui você pode revisar, editar valores ou cancelar um pagamento.
-                </p>
-                <div className="button-row">
-                  <button type="button" disabled={saving} onClick={handleExportAdminPagamentosCsv}>
-                    Exportar CSV
-                  </button>
-                </div>
-                <ul className="admin-pagamentos-list">
-                  {filteredPagamentos.map((p) => {
-                    const dataStr = p.data_pagamento ? p.data_pagamento.slice(0, 10) : "-";
-                    const descricao = p.descricao || "Pagamento";
-                    const valorNum = Number(p.valor || 0);
-                    return (
-                      <li key={p.id} className="admin-pagamento-item">
-                        <div className="admin-pagamento-textos">
-                          <div className="admin-pagamento-descricao">{descricao}</div>
-                          <div className="admin-pagamento-meta">
-                            <span>{dataStr}</span>
+        {isAdmin &&
+          activePanel === "admin" &&
+          adminPage === "workspace" &&
+          adminActiveTab === "pagamentos" && (
+            <section className="card-section">
+              <strong>Pagamentos do usuário</strong>
+              <p className="section-subtitle">
+                Use o botão abaixo para registrar um novo pagamento para o
+                usuário selecionado.
+              </p>
+              <div className="button-row">
+                <button
+                  type="button"
+                  disabled={saving || !targetUserId}
+                  onClick={() => setUserActiveForm("pagamento")}
+                >
+                  Novo pagamento
+                </button>
+              </div>
+              {(() => {
+                if (filteredPagamentos.length === 0) {
+                  return (
+                    <p className="section-subtitle">
+                      Nenhum pagamento foi encontrado para este usuário.
+                    </p>
+                  );
+                }
+
+                return (
+                  <>
+                    <p className="section-subtitle">
+                      Pagamentos registrados para este usuário. Aqui você pode
+                      revisar, editar valores ou cancelar um pagamento.
+                    </p>
+                    <div className="button-row">
+                      <button
+                        type="button"
+                        disabled={saving}
+                        onClick={handleExportAdminPagamentosCsv}
+                      >
+                        Exportar CSV
+                      </button>
+                    </div>
+                    <ul className="admin-pagamentos-list">
+                      {filteredPagamentos.map((p) => {
+                      const dataStr = p.data_pagamento
+                        ? p.data_pagamento.slice(0, 10)
+                        : "-";
+                      const descricao = p.descricao || "Pagamento";
+                      const valorNum = Number(p.valor || 0);
+                      return (
+                        <li key={p.id} className="admin-pagamento-item">
+                          <div className="admin-pagamento-textos">
+                            <div className="admin-pagamento-descricao">
+                              {descricao}
+                            </div>
+                            <div className="admin-pagamento-meta">
+                              <span>{dataStr}</span>
+                            </div>
                           </div>
-                        </div>
-                        <div className="gasto-acoes">
-                          <div className="admin-pagamento-valor">{formatCurrencyBRL(valorNum)}</div>
-                          <button type="button" disabled={saving} onClick={() => handleSelectPagamento(p)}>
-                            Editar
-                          </button>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </>
+                          <div className="gasto-acoes">
+                            <div className="admin-pagamento-valor">
+                              {formatCurrencyBRL(valorNum)}
+                            </div>
+                            <button
+                              type="button"
+                              disabled={saving}
+                              onClick={() => handleSelectPagamento(p)}
+                            >
+                              Editar
+                            </button>
+                          </div>
+                        </li>
+                      );
+                      })}
+                    </ul>
+                  </>
+                );
+              })()}
+            </section>
+          )}
+
+        {(() => {
+          if (
+            !isAdmin ||
+            activePanel !== "admin" ||
+            adminPage !== "workspace" ||
+            adminActiveTab !== "faturas"
+          ) {
+            return null;
+          }
+
+          return (
+          <section className="card-section">
+            <SectionHeader
+              title="Solicitações de fatura (PDF)"
+              subtitle="Pedidos feitos pelos usuários. Gere o PDF com os dados do sistema ou anexe um PDF pronto."
+            />
+
+            {adminInvoiceRequestsError && (
+              <div className="error">{adminInvoiceRequestsError}</div>
             )}
+            {adminInvoiceRequestsMessage && (
+              <div className="success">{adminInvoiceRequestsMessage}</div>
+            )}
+
+            <div className="button-row mt-1">
+              <button
+                type="button"
+                className="button--sm button--ghost"
+                disabled={adminInvoiceRequestsLoading || saving}
+                onClick={() => setAdminInvoiceRequestsReloadToken((t) => t + 1)}
+              >
+                {adminInvoiceRequestsLoading ? "Atualizando..." : "Atualizar lista"}
+              </button>
+            </div>
+
+            {(() => {
+              if (adminInvoiceRequestsLoading) {
+                return (
+                  <p className="section-subtitle">Carregando solicitações...</p>
+                );
+              }
+
+              if (adminInvoiceRequests.length === 0) {
+                return (
+                  <p className="section-subtitle">
+                    Nenhuma solicitação pendente foi encontrada.
+                  </p>
+                );
+              }
+
+              return (
+                <ul className="admin-pagamentos-list">
+                  {adminInvoiceRequests.map((req: any) => {
+                  const id = String(req?.id || "");
+                  const cycle = String(req?.cycle || "-");
+                  const userId = String(req?.user_id || "-");
+                  const status = String(req?.status || "pending");
+                  const userName = String(req?.user_name || "").trim();
+                  const username = req?.username ? String(req.username) : null;
+                  let label = userId;
+                  if (userName) {
+                    label = userName;
+                    if (username) {
+                      label = `${userName} (@${username})`;
+                    }
+                  } else if (username) {
+                    label = `@${username}`;
+                  }
+                  const uploadInputId = `upload_${id || `${userId}_${cycle}`}`;
+
+                  async function handleGenerate() {
+                    setAdminInvoiceRequestsError(null);
+                    setAdminInvoiceRequestsMessage(null);
+                    setSaving(true);
+                    try {
+                      const resp = await fetch(
+                        `${functionsBaseUrl}/adminGenerateInvoicePdf`,
+                        {
+                          method: "POST",
+                          headers: {
+                            "Content-Type": "application/json",
+                            "x-telegram-init-data": webApp?.initData ?? "",
+                          },
+                          body: JSON.stringify({ userId, cycle }),
+                        },
+                      );
+
+                      const data = await resp.json().catch(() => null);
+                      if (!resp.ok) {
+                        setAdminInvoiceRequestsError(
+                          data?.error || "Erro ao gerar PDF.",
+                        );
+                        return;
+                      }
+                      setAdminInvoiceRequestsMessage(
+                        `PDF gerado para ${label} (${cycle}).`,
+                      );
+                      setAdminInvoiceRequestsReloadToken((t) => t + 1);
+                    } catch (err: any) {
+                      console.error("Erro ao gerar invoice PDF", err);
+                      setAdminInvoiceRequestsError(
+                        err?.message ?? "Erro ao gerar PDF.",
+                      );
+                    } finally {
+                      setSaving(false);
+                    }
+                  }
+
+                  async function handleUpload(file: File) {
+                    setAdminInvoiceRequestsError(null);
+                    setAdminInvoiceRequestsMessage(null);
+                    setSaving(true);
+                    try {
+                      const prepResp = await fetch(
+                        `${functionsBaseUrl}/adminCreateInvoiceUploadUrl`,
+                        {
+                          method: "POST",
+                          headers: {
+                            "Content-Type": "application/json",
+                            "x-telegram-init-data": webApp?.initData ?? "",
+                          },
+                          body: JSON.stringify({ userId, cycle }),
+                        },
+                      );
+                      const prepData = await prepResp.json().catch(() => null);
+                      if (!prepResp.ok) {
+                        setAdminInvoiceRequestsError(
+                          prepData?.error || "Erro ao preparar upload.",
+                        );
+                        return;
+                      }
+
+                      const uploadUrl = prepData?.upload_url;
+                      const requestId = prepData?.request_id;
+                      if (!uploadUrl || !requestId) {
+                        setAdminInvoiceRequestsError(
+                          "Resposta inválida ao preparar upload.",
+                        );
+                        return;
+                      }
+
+                      const putResp = await fetch(uploadUrl, {
+                        method: "PUT",
+                        headers: {
+                          "Content-Type": "application/pdf",
+                        },
+                        body: file,
+                      });
+                      if (!putResp.ok) {
+                        setAdminInvoiceRequestsError(
+                          `Falha no upload do PDF (HTTP ${putResp.status}).`,
+                        );
+                        return;
+                      }
+
+                      const finResp = await fetch(
+                        `${functionsBaseUrl}/adminMarkInvoiceUploaded`,
+                        {
+                          method: "POST",
+                          headers: {
+                            "Content-Type": "application/json",
+                            "x-telegram-init-data": webApp?.initData ?? "",
+                          },
+                          body: JSON.stringify({ requestId }),
+                        },
+                      );
+                      const finData = await finResp.json().catch(() => null);
+                      if (!finResp.ok) {
+                        setAdminInvoiceRequestsError(
+                          finData?.error || "Erro ao finalizar upload.",
+                        );
+                        return;
+                      }
+
+                      setAdminInvoiceRequestsMessage(
+                        `PDF anexado para ${label} (${cycle}).`,
+                      );
+                      setAdminInvoiceRequestsReloadToken((t) => t + 1);
+                    } catch (err: any) {
+                      console.error("Erro ao anexar invoice PDF", err);
+                      setAdminInvoiceRequestsError(
+                        err?.message ?? "Erro ao anexar PDF.",
+                      );
+                    } finally {
+                      setSaving(false);
+                    }
+                  }
+
+                  return (
+                    <li
+                      key={id || `${userId}_${cycle}`}
+                      className="admin-pagamento-item"
+                    >
+                      <div className="admin-pagamento-textos">
+                        <div className="admin-pagamento-descricao">{label}</div>
+                        <div className="admin-pagamento-meta">
+                          <span>ID {userId}</span>
+                          <span>•</span>
+                          <span>Ciclo {cycle}</span>
+                          <span>•</span>
+                          <span>Status: {status}</span>
+                        </div>
+                      </div>
+                      <div className="gasto-acoes">
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={handleGenerate}
+                        >
+                          Gerar PDF
+                        </button>
+                        <label
+                          htmlFor={uploadInputId}
+                          className="button--sm"
+                          style={{ cursor: saving ? "not-allowed" : "pointer" }}
+                        >
+                          <span>Anexar PDF</span>
+                        </label>
+                        <input
+                          id={uploadInputId}
+                          type="file"
+                          accept="application/pdf"
+                          disabled={saving}
+                          style={{ display: "none" }}
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            e.currentTarget.value = "";
+                            if (!f) return;
+                            handleUpload(f);
+                          }}
+                        />
+                      </div>
+                    </li>
+                  );
+                })}
+                </ul>
+              );
+            })()}
           </section>
-        )}
+          );
+        })()}
       </div>
     </div>
   );

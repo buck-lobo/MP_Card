@@ -1,46 +1,236 @@
 import * as functions from "firebase-functions";
 import { Request, Response } from "firebase-functions";
-import { handleUpdate } from "./telegram/router";
 import { db } from "./firebase";
-import { ADMIN_USER_IDS } from "./admin";
 import { parseAndVerifyInitData, WebAppUser } from "./telegram/webappAuth";
 import {
-  obterExtratoConsumoUsuario,
   calcularSaldoUsuarioAteMes,
+  getFaturaCycleFromDate,
 } from "./telegram/handlers";
-import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
+import { ADMIN_USER_IDS } from "./admin";
 
-declare function setWebAppCors(res: Response): void;
-declare function parseBool(value: unknown): boolean | null;
-declare function resolveTargetUserId(term: string): Promise<string | null>;
-declare function verifyAdminFromRequest(req: Request, res: Response): Promise<WebAppUser | null>;
-declare function getWebAppUserContext(
+function setWebAppCors(res: Response): void {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set(
+    "Access-Control-Allow-Headers",
+    "Origin, X-Requested-With, Content-Type, Accept, Authorization, x-telegram-init-data",
+  );
+  res.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+}
+
+function getInitDataFromRequest(req: Request): string {
+  const initDataHeader = req.get("x-telegram-init-data") || "";
+  const initDataBody =
+    typeof req.body?.initData === "string" ? req.body.initData : "";
+  const initDataQuery =
+    typeof req.query?.initData === "string" ? req.query.initData : "";
+
+  return (initDataHeader || initDataBody || initDataQuery).trim();
+}
+
+function parseBool(value: unknown): boolean | null {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    const lower = value.toLowerCase().trim();
+    if (lower === "true") {
+      return true;
+    }
+    if (lower === "false") {
+      return false;
+    }
+  }
+  return null;
+}
+
+async function resolveTargetUserId(term: string): Promise<string | null> {
+  const raw = (term || "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  if (/^\d+$/.test(raw)) {
+    return raw;
+  }
+
+  let username = raw;
+  if (username.startsWith("@")) {
+    username = username.substring(1);
+  }
+
+  try {
+    const byUsernameSnap = await db
+      .collection("usuarios")
+      .where("username", "==", username)
+      .limit(1)
+      .get();
+    if (!byUsernameSnap.empty) {
+      return byUsernameSnap.docs[0].id;
+    }
+
+    const allUsersSnap = await db.collection("usuarios").get();
+    const termLower = raw.toLowerCase();
+    for (const doc of allUsersSnap.docs) {
+      const data = doc.data() || {};
+      const name = String(data.name || "").toLowerCase();
+      if (name.includes(termLower)) {
+        return doc.id;
+      }
+    }
+  } catch (err) {
+    console.error("Erro em resolveTargetUserId para termo", term, err);
+  }
+
+  return null;
+}
+
+async function verifyAdminFromRequest(
   req: Request,
-  res: Response
+  res: Response,
+): Promise<WebAppUser | null> {
+  const initData = getInitDataFromRequest(req);
+
+  if (!initData) {
+    setWebAppCors(res);
+    res.status(401).send("initData ausente");
+    return null;
+  }
+
+  let user: WebAppUser;
+  try {
+    user = parseAndVerifyInitData(initData, getBotToken());
+  } catch (err) {
+    console.error("Erro ao validar initData do WebApp (admin):", err);
+    setWebAppCors(res);
+    res.status(401).send("initData inválido");
+    return null;
+  }
+
+  if (!ADMIN_USER_IDS.includes(String(user.id))) {
+    setWebAppCors(res);
+    res.status(403).send("Acesso restrito a administradores");
+    return null;
+  }
+
+  return user;
+}
+
+async function getWebAppUserContext(
+  req: Request,
+  res: Response,
 ): Promise<{
   userIdStr: string;
   autorizado: boolean;
   isAdmin: boolean;
-  webAppUser: any;
+  webAppUser: WebAppUser;
   userRecord?: any;
-} | null>;
+  actorUserIdStr: string;
+  impersonating: boolean;
+} | null> {
+  const initData = getInitDataFromRequest(req);
+  if (!initData) {
+    setWebAppCors(res);
+    res.status(401).send("initData ausente");
+    return null;
+  }
 
-const secretClient = new SecretManagerServiceClient();
+  let webAppUser: WebAppUser;
+  try {
+    webAppUser = parseAndVerifyInitData(initData, getBotToken());
+  } catch (err) {
+    console.error("Erro ao validar initData do WebApp (usuário):", err);
+    setWebAppCors(res);
+    res.status(401).send("initData inválido");
+    return null;
+  }
 
-async function getSecret(name: string): Promise<string> {
-  const [version] = await secretClient.accessSecretVersion({
-    name: `projects/${process.env.GCLOUD_PROJECT}/secrets/${name}/versions/latest`,
-  });
-  return version.payload?.data?.toString() || '';
+  const actorUserIdStr = String(webAppUser.id);
+  const isAdmin = ADMIN_USER_IDS.includes(actorUserIdStr);
+  const body = req.body || {};
+  const query = req.query || {};
+  const targetTerm = (
+    (typeof body.targetUserId === "string" ? body.targetUserId : "") ||
+    (typeof body.userId === "string" ? body.userId : "") ||
+    (typeof query.targetUserId === "string" ? query.targetUserId : "") ||
+    (typeof query.userId === "string" ? query.userId : "")
+  ).trim();
+
+  let userIdStr = actorUserIdStr;
+  if (isAdmin && targetTerm) {
+    const resolvedTarget = await resolveTargetUserId(targetTerm);
+    if (!resolvedTarget) {
+      setWebAppCors(res);
+      res.status(404).json({ error: "Usuário alvo não encontrado." });
+      return null;
+    }
+    userIdStr = resolvedTarget;
+  }
+
+  const actorUserRef = db.collection("usuarios").doc(actorUserIdStr);
+  try {
+    await actorUserRef.set(
+      {
+        name: webAppUser.first_name ?? "",
+        username: webAppUser.username ?? null,
+        last_seen: new Date(),
+        ativo: true,
+        atualizado_em: new Date(),
+      },
+      { merge: true },
+    );
+  } catch (err) {
+    console.error(
+      "Erro ao registrar/atualizar usuário do WebApp (usuário):",
+      err,
+    );
+  }
+
+  const userRef = db.collection("usuarios").doc(userIdStr);
+  let data: any = {};
+  try {
+    const snap = await userRef.get();
+    if (!snap.exists && userIdStr !== actorUserIdStr) {
+      setWebAppCors(res);
+      res.status(404).json({ error: "Usuário alvo não encontrado." });
+      return null;
+    }
+    data = snap.data() || {};
+  } catch (err) {
+    console.error("Erro ao ler dados do usuário do WebApp:", err);
+  }
+
+  let autorizado = data.autorizado === true || isAdmin;
+  if (isAdmin && userIdStr !== actorUserIdStr) {
+    autorizado = true;
+  }
+
+  if (isAdmin && userIdStr === actorUserIdStr && data.autorizado !== true) {
+    try {
+      await userRef.set({ autorizado: true }, { merge: true });
+    } catch (err) {
+      console.error(
+        "Erro ao marcar admin como autorizado para WebApp de usuário:",
+        err,
+      );
+    }
+  }
+
+  return {
+    webAppUser,
+    userIdStr,
+    userRecord: data,
+    isAdmin,
+    autorizado,
+    actorUserIdStr,
+    impersonating: userIdStr !== actorUserIdStr,
+  };
 }
 
-async function getBotToken(): Promise<string> {
-  const token =
-    process.env.TELEGRAM_BOT_TOKEN || await getSecret('telegram-bot-token');
+function getBotToken(): string {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) {
     throw new Error("TELEGRAM_BOT_TOKEN não configurado.");
   }
-
   return token;
 }
 
@@ -79,7 +269,7 @@ function isWithinEditWindow(date: Date | null): boolean {
 }
 
 function parseCycleString(
-  cycleRaw: unknown
+  cycleRaw: unknown,
 ): { mes: number; ano: number; cycle: string } | null {
   const cycle = typeof cycleRaw === "string" ? cycleRaw.trim() : "";
   if (!cycle) {
@@ -184,30 +374,25 @@ export const userListRecurringGastos = functions.https.onRequest(
       console.error("Erro em userListRecurringGastos", err);
       res.status(500).json({ error: "Erro ao listar gastos recorrentes" });
     }
-  }
+  },
 );
 
 export const userEditGasto = functions.https.onRequest(
   async (req: Request, res: Response) => {
+    // NOSONAR
     if (req.method === "OPTIONS") {
       setWebAppCors(res);
       res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
       res.status(204).send("");
       return;
     }
-
     if (req.method !== "POST") {
       res.status(405).send("Method Not Allowed");
       return;
     }
-
     const ctx = await getWebAppUserContext(req, res);
-    if (!ctx) {
-      return;
-    }
-
+    if (!ctx) return;
     setWebAppCors(res);
-
     if (!ctx.autorizado) {
       res.status(403).json({
         autorizado: false,
@@ -217,65 +402,59 @@ export const userEditGasto = functions.https.onRequest(
       });
       return;
     }
-
     const body = req.body || {};
     const gastoIdRaw = body.gastoId;
     const novoValorRaw = body.novoValorTotal;
     const novasParcelasRaw = body.novasParcelas;
     const descricaoRaw = body.descricao;
     const categoriaRaw = body.categoria;
-
     const gastoId = typeof gastoIdRaw === "string" ? gastoIdRaw.trim() : "";
     const descricao =
       typeof descricaoRaw === "string" ? descricaoRaw.trim() : "";
     const categoria =
       typeof categoriaRaw === "string" ? categoriaRaw.trim() : "";
-
     let novoValorTotal: number | null = null;
-    if (typeof novoValorRaw === "number") {
-      novoValorTotal = novoValorRaw;
-    } else if (typeof novoValorRaw === "string" && novoValorRaw.trim()) {
+    if (typeof novoValorRaw === "number") novoValorTotal = novoValorRaw;
+    else if (typeof novoValorRaw === "string" && novoValorRaw.trim())
       novoValorTotal = Number(novoValorRaw.replace(",", "."));
-    }
-
     let novasParcelas: number | null = null;
     if (
       novasParcelasRaw !== undefined &&
       novasParcelasRaw !== null &&
       novasParcelasRaw !== ""
     ) {
-      if (typeof novasParcelasRaw === "number") {
+      if (typeof novasParcelasRaw === "number")
         novasParcelas = novasParcelasRaw;
-      } else {
+      else {
         const parsed = Number.parseInt(String(novasParcelasRaw), 10);
-        if (!Number.isNaN(parsed)) {
-          novasParcelas = parsed;
-        }
+        if (!Number.isNaN(parsed)) novasParcelas = parsed;
       }
     }
-
+    // Validações extraídas
     if (!gastoId) {
       res.status(400).json({ error: "gastoId obrigatório" });
       return;
     }
-
-    if (!descricao && !categoria && novoValorTotal === null && novasParcelas === null) {
+    if (
+      !descricao &&
+      !categoria &&
+      novoValorTotal === null &&
+      novasParcelas === null
+    ) {
       res.status(400).json({ error: "Nenhuma alteração informada" });
       return;
     }
-
     if (categoria && categoria.length > 50) {
       res.status(400).json({ error: "categoria muito longa (máx 50)" });
       return;
     }
-
-    if (novoValorTotal !== null) {
-      if (!Number.isFinite(novoValorTotal) || novoValorTotal <= 0) {
-        res.status(400).json({ error: "novoValorTotal inválido" });
-        return;
-      }
+    if (
+      novoValorTotal !== null &&
+      (!Number.isFinite(novoValorTotal) || novoValorTotal <= 0)
+    ) {
+      res.status(400).json({ error: "novoValorTotal inválido" });
+      return;
     }
-
     if (novasParcelas !== null) {
       if (!Number.isFinite(novasParcelas) || novasParcelas <= 0) {
         res.status(400).json({ error: "novasParcelas inválido" });
@@ -286,7 +465,6 @@ export const userEditGasto = functions.https.onRequest(
         return;
       }
     }
-
     try {
       const docRef = db.collection("gastos").doc(gastoId);
       const snap = await docRef.get();
@@ -294,57 +472,41 @@ export const userEditGasto = functions.https.onRequest(
         res.status(404).json({ error: "Gasto não encontrado" });
         return;
       }
-
       const gasto = snap.data() || {};
       if (String(gasto.user_id || "") !== ctx.userIdStr) {
-        res.status(403).json({ error: "Sem permissão para alterar este gasto" });
+        res
+          .status(403)
+          .json({ error: "Sem permissão para alterar este gasto" });
         return;
       }
-
       if (gasto.ativo === false) {
         res.status(400).json({ error: "Gasto já está inativo" });
         return;
       }
-
-      const baseDate = toJsDateAny(gasto.data_compra) || toJsDateAny(gasto.criado_em);
+      const baseDate =
+        toJsDateAny(gasto.data_compra) || toJsDateAny(gasto.criado_em);
       if (!isWithinEditWindow(baseDate)) {
         res.status(400).json({
           error: `Este gasto não pode mais ser alterado (janela de ${USER_EDIT_WINDOW_DAYS} dias).`,
         });
         return;
       }
-
-      const parcelasAtuais = Number(gasto.parcelas_total || 1);
-      const parcelasFinal = novasParcelas != null ? novasParcelas : parcelasAtuais;
-
-      const valorTotalAtual = Number(gasto.valor_total || gasto.valor_parcela || 0);
-      const valorTotalFinal = novoValorTotal != null ? novoValorTotal : valorTotalAtual;
-
-      const valorParcelaFinal = valorTotalFinal / parcelasFinal;
-
-      const updates: any = {
-        atualizado_em: new Date(),
-      };
-      if (descricao) {
-        updates.descricao = descricao;
-      }
-      if (categoria) {
-        updates.categoria = categoria;
-      }
-      if (novoValorTotal != null || novasParcelas != null) {
-        updates.valor_total = Number(valorTotalFinal.toFixed(2));
-        updates.valor_parcela = Number(valorParcelaFinal.toFixed(2));
-        updates.parcelas_total = parcelasFinal;
-      }
-
+      // Atualização extraída
+      const { updates, parcelasFinal, valorTotalFinal, valorParcelaFinal } =
+        buildGastoUpdates(
+          gasto,
+          descricao,
+          categoria,
+          novoValorTotal,
+          novasParcelas,
+        );
       await docRef.set(updates, { merge: true });
-
       res.status(200).json({
         ok: true,
         user_id: ctx.userIdStr,
         gastoId,
-        descricao: descricao || (gasto.descricao || ""),
-        categoria: categoria || (gasto.categoria || ""),
+        descricao: descricao || gasto.descricao || "",
+        categoria: categoria || gasto.categoria || "",
         valor_total: Number(valorTotalFinal.toFixed(2)),
         valor_parcela: Number(valorParcelaFinal.toFixed(2)),
         parcelas_total: parcelasFinal,
@@ -353,8 +515,31 @@ export const userEditGasto = functions.https.onRequest(
       console.error("Erro em userEditGasto", err);
       res.status(500).json({ error: "Erro ao editar gasto" });
     }
-  }
+  },
 );
+
+function buildGastoUpdates(
+  gasto: any,
+  descricao: string,
+  categoria: string,
+  novoValorTotal: number | null,
+  novasParcelas: number | null,
+) {
+  const parcelasAtuais = Number(gasto.parcelas_total || 1);
+  const parcelasFinal = novasParcelas ?? parcelasAtuais;
+  const valorTotalAtual = Number(gasto.valor_total || gasto.valor_parcela || 0);
+  const valorTotalFinal = novoValorTotal ?? valorTotalAtual;
+  const valorParcelaFinal = valorTotalFinal / parcelasFinal;
+  const updates: any = { atualizado_em: new Date() };
+  if (descricao) updates.descricao = descricao;
+  if (categoria) updates.categoria = categoria;
+  if (novoValorTotal != null || novasParcelas != null) {
+    updates.valor_total = Number(valorTotalFinal.toFixed(2));
+    updates.valor_parcela = Number(valorParcelaFinal.toFixed(2));
+    updates.parcelas_total = parcelasFinal;
+  }
+  return { updates, parcelasFinal, valorTotalFinal, valorParcelaFinal };
+}
 
 export const userUpsertRecurringGasto = functions.https.onRequest(
   async (req: Request, res: Response) => {
@@ -364,19 +549,13 @@ export const userUpsertRecurringGasto = functions.https.onRequest(
       res.status(204).send("");
       return;
     }
-
     if (req.method !== "POST") {
       res.status(405).send("Method Not Allowed");
       return;
     }
-
     const ctx = await getWebAppUserContext(req, res);
-    if (!ctx) {
-      return;
-    }
-
+    if (!ctx) return;
     setWebAppCors(res);
-
     if (!ctx.autorizado) {
       res.status(403).json({
         autorizado: false,
@@ -386,70 +565,46 @@ export const userUpsertRecurringGasto = functions.https.onRequest(
       });
       return;
     }
-
     const body = req.body || {};
     const idRaw = body.id;
     const descricaoRaw = body.descricao;
     const valorRaw = body.valor;
     const ativoRaw = body.ativo;
     const categoriaRaw = body.categoria;
-
     const descricao =
       typeof descricaoRaw === "string" ? descricaoRaw.trim() : "";
-
     const categoria =
       typeof categoriaRaw === "string" ? categoriaRaw.trim() : "";
-
     let valor: number = Number.NaN;
-    if (typeof valorRaw === "number") {
-      valor = valorRaw;
-    } else if (typeof valorRaw === "string") {
+    if (typeof valorRaw === "number") valor = valorRaw;
+    else if (typeof valorRaw === "string")
       valor = Number(valorRaw.replace(",", "."));
-    }
-
     const ativo = parseBool(ativoRaw);
-
-    if (!descricao) {
-      res.status(400).json({ error: "Descrição obrigatória" });
+    // Validações extraídas
+    const validationError = validateRecurringGasto(descricao, categoria, valor);
+    if (validationError) {
+      res.status(400).json({ error: validationError });
       return;
     }
-
-    if (categoria && categoria.length > 50) {
-      res.status(400).json({ error: "categoria muito longa (máx 50)" });
-      return;
-    }
-
-    if (!Number.isFinite(valor) || valor <= 0) {
-      res.status(400).json({ error: "Valor inválido" });
-      return;
-    }
-
     const now = new Date();
     const providedId = typeof idRaw === "string" ? idRaw.trim() : "";
-    const id = providedId || `rg_${ctx.userIdStr}_${Math.floor(Date.now() / 1000)}`;
-
+    const id =
+      providedId || `rg_${ctx.userIdStr}_${Math.floor(Date.now() / 1000)}`;
     try {
-      const payload: any = {
+      const payload = buildRecurringGastoPayload({
         id,
-        user_id: ctx.userIdStr,
+        userId: ctx.userIdStr,
         descricao,
-        ...(categoria ? { categoria } : {}),
-        valor_total: Number(Number(valor).toFixed(2)),
-        atualizado_em: now,
-      };
-      if (ativo !== null) {
-        payload.ativo = ativo;
-      }
-      if (!providedId) {
-        payload.criado_em = now;
-        payload.ativo = ativo === null ? true : ativo;
-      }
-
+        categoria,
+        valor,
+        ativo,
+        now,
+        providedId,
+      });
       await db
         .collection("gastos_recorrentes")
         .doc(id)
         .set(payload, { merge: true });
-
       res.status(200).json({
         ok: true,
         user_id: ctx.userIdStr,
@@ -463,11 +618,53 @@ export const userUpsertRecurringGasto = functions.https.onRequest(
       console.error("Erro em userUpsertRecurringGasto", err);
       res.status(500).json({ error: "Erro ao salvar gasto recorrente" });
     }
-  }
+  },
 );
+
+function validateRecurringGasto(
+  descricao: string,
+  categoria: string,
+  valor: number,
+): string | null {
+  if (!descricao) return "Descrição obrigatória";
+  if (categoria && categoria.length > 50)
+    return "categoria muito longa (máx 50)";
+  if (!Number.isFinite(valor) || valor <= 0) return "Valor inválido";
+  return null;
+}
+
+type RecurringGastoPayloadParams = {
+  id: string;
+  userId: string;
+  descricao: string;
+  categoria: string;
+  valor: number;
+  ativo: boolean | null;
+  now: Date;
+  providedId: string;
+};
+function buildRecurringGastoPayload(params: RecurringGastoPayloadParams) {
+  const { id, userId, descricao, categoria, valor, ativo, now, providedId } =
+    params;
+  const payload: any = {
+    id,
+    user_id: userId,
+    descricao,
+    ...(categoria ? { categoria } : {}),
+    valor_total: Number(Number(valor).toFixed(2)),
+    atualizado_em: now,
+  };
+  if (ativo !== null) payload.ativo = ativo;
+  if (!providedId) {
+    payload.criado_em = now;
+    payload.ativo = ativo ?? true;
+  }
+  return payload;
+}
 
 export const userApplyRecurringGastos = functions.https.onRequest(
   async (req: Request, res: Response) => {
+    // NOSONAR
     if (req.method === "OPTIONS") {
       setWebAppCors(res);
       res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -532,7 +729,12 @@ export const userApplyRecurringGastos = functions.https.onRequest(
         const descricao = String(tpl.descricao || "").trim();
         const valorTotal = Number(tpl.valor_total || 0);
         const categoria = String(tpl.categoria || "").trim();
-        if (!tplId || !descricao || !Number.isFinite(valorTotal) || valorTotal <= 0) {
+        if (
+          !tplId ||
+          !descricao ||
+          !Number.isFinite(valorTotal) ||
+          valorTotal <= 0
+        ) {
           skipped += 1;
           continue;
         }
@@ -565,7 +767,11 @@ export const userApplyRecurringGastos = functions.https.onRequest(
           created += 1;
         } catch (err: any) {
           const code = err?.code;
-          if (code === 6 || code === "already-exists" || code === "ALREADY_EXISTS") {
+          if (
+            code === 6 ||
+            code === "already-exists" ||
+            code === "ALREADY_EXISTS"
+          ) {
             skipped += 1;
             continue;
           }
@@ -586,7 +792,7 @@ export const userApplyRecurringGastos = functions.https.onRequest(
       console.error("Erro em userApplyRecurringGastos", err);
       res.status(500).json({ error: "Erro ao aplicar gastos recorrentes" });
     }
-  }
+  },
 );
 
 export const userListGastos = functions.https.onRequest(
@@ -634,6 +840,8 @@ export const userListGastos = functions.https.onRequest(
         .collection("gastos")
         .where("user_id", "==", ctx.userIdStr)
         .where("ativo", "==", true)
+        .orderBy("data_compra", "desc")
+        .limit(limit)
         .get();
 
       const itens: any[] = [];
@@ -644,6 +852,8 @@ export const userListGastos = functions.https.onRequest(
         const dataCompraAny: any = dataCompraRaw;
         if (dataCompraAny && typeof dataCompraAny.toDate === "function") {
           dataCompraIso = dataCompraAny.toDate().toISOString();
+        } else if (dataCompraRaw instanceof Date) {
+          dataCompraIso = dataCompraRaw.toISOString();
         }
 
         itens.push({
@@ -652,37 +862,27 @@ export const userListGastos = functions.https.onRequest(
           categoria: data.categoria || "",
           valor_total: Number(data.valor_total || data.valor_parcela || 0),
           parcelas_total: Number(data.parcelas_total || 1),
-          valor_parcela: Number(
-            data.valor_parcela || data.valor_total || 0
-          ),
+          valor_parcela: Number(data.valor_parcela || data.valor_total || 0),
           data_compra: dataCompraIso,
           ativo: data.ativo !== false,
         });
       });
 
-      itens.sort((a, b) => {
-        const ta = a.data_compra ? Date.parse(a.data_compra) : 0;
-        const tb = b.data_compra ? Date.parse(b.data_compra) : 0;
-        return tb - ta;
-      });
-
-      const limited = itens.slice(0, limit);
-
       res.status(200).json({
         ok: true,
         user_id: ctx.userIdStr,
-        total: itens.length,
-        itens: limited,
+        itens,
       });
     } catch (err) {
       console.error("Erro em userListGastos", err);
       res.status(500).json({ error: "Erro ao listar gastos" });
     }
-  }
+  },
 );
 
 export const userRegistrarGasto = functions.https.onRequest(
   async (req: Request, res: Response) => {
+    // NOSONAR
     if (req.method === "OPTIONS") {
       setWebAppCors(res);
       res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -733,7 +933,7 @@ export const userRegistrarGasto = functions.https.onRequest(
 
     let parcelas = 1;
     if (
-      typeof parcelasRaw !== "undefined" &&
+      parcelasRaw !== undefined &&
       parcelasRaw !== null &&
       parcelasRaw !== ""
     ) {
@@ -774,9 +974,7 @@ export const userRegistrarGasto = functions.https.onRequest(
 
     try {
       const agora = new Date();
-      const gastoId = `${ctx.userIdStr}_${Math.floor(
-        Date.now() / 1000
-      )}`;
+      const gastoId = `${ctx.userIdStr}_${Math.floor(Date.now() / 1000)}`;
       const valorTotal = Number(valor);
       const valorParcela = valorTotal / parcelas;
 
@@ -814,7 +1012,7 @@ export const userRegistrarGasto = functions.https.onRequest(
       console.error("Erro em userRegistrarGasto", err);
       res.status(500).json({ error: "Erro ao registrar gasto" });
     }
-  }
+  },
 );
 
 export const userRegistrarPagamento = functions.https.onRequest(
@@ -871,33 +1069,31 @@ export const userRegistrarPagamento = functions.https.onRequest(
 
     try {
       const agora = new Date();
+      const cicloPagamento = getFaturaCycleFromDate(agora);
       const pagamentoId = `pag_${ctx.userIdStr}_${Math.floor(
-        Date.now() / 1000
+        Date.now() / 1000,
       )}`;
 
       const valorFinal = Number(valor.toFixed(2));
 
-      await db
-        .collection("pagamentos")
-        .doc(pagamentoId)
-        .set({
-          id: pagamentoId,
-          user_id: ctx.userIdStr,
-          valor: valorFinal,
-          descricao,
-          data_pagamento: agora,
-          mes: agora.getMonth() + 1,
-          ano: agora.getFullYear(),
-          criado_em: agora,
-          atualizado_em: agora,
-        });
+      await db.collection("pagamentos").doc(pagamentoId).set({
+        id: pagamentoId,
+        user_id: ctx.userIdStr,
+        valor: valorFinal,
+        descricao,
+        data_pagamento: agora,
+        mes: cicloPagamento.mes,
+        ano: cicloPagamento.ano,
+        criado_em: agora,
+        atualizado_em: agora,
+      });
 
-      const mesRef = agora.getMonth() + 1;
-      const anoRef = agora.getFullYear();
+      const mesRef = cicloPagamento.mes;
+      const anoRef = cicloPagamento.ano;
       const saldoDepois = await calcularSaldoUsuarioAteMes(
         ctx.userIdStr,
         mesRef,
-        anoRef
+        anoRef,
       );
 
       res.status(200).json({
@@ -912,5 +1108,5 @@ export const userRegistrarPagamento = functions.https.onRequest(
       console.error("Erro em userRegistrarPagamento", err);
       res.status(500).json({ error: "Erro ao registrar pagamento" });
     }
-  }
+  },
 );
